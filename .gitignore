@@ -1,0 +1,15 @@
+# Foundry
+out/
+cache/
+broadcast/**/dry-run/
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/
+# Slither
+slither-report.json
+crytic-export/

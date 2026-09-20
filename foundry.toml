@@ -1,0 +1,47 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+script = "script"
+solc = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 10_000
+via_ir = false
+# Deterministic, verifiable builds for immutable mainnet deployment.
+bytecode_hash = "ipfs"
+cbor_metadata = true
+gas_reports = ["OTTPRegistry", "OTTPSubjectResolver", "OTTPObjectResolver"]
+
+[fuzz]
+runs = 2000
+max_test_rejects = 200_000
+
+[invariant]
+runs = 256
+depth = 64
+fail_on_revert = false
+call_override = false
+
+# Heavier settings for a pre-deploy pass: FOUNDRY_PROFILE=deep forge test
+[profile.deep]
+[profile.deep.fuzz]
+runs = 20_000
+[profile.deep.invariant]
+runs = 1000
+depth = 128
+
+[rpc_endpoints]
+base = "${BASE_RPC_URL}"
+base_sepolia = "${BASE_SEPOLIA_RPC_URL}"
+
+[etherscan]
+base = { key = "${BASESCAN_API_KEY}", chain = 8453, url = "https://api.etherscan.io/v2/api?chainid=8453" }
+base_sepolia = { key = "${BASESCAN_API_KEY}", chain = 84532, url = "https://api.etherscan.io/v2/api?chainid=84532" }
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = true
+int_types = "long"
