@@ -1,0 +1,9 @@
+{
+  "filter_paths": "(lib/|test/|script/)",
+  "exclude_dependencies": true,
+  "solc_remaps": [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@ethereum-attestation-service/eas-contracts/=lib/eas-contracts/",
+    "forge-std/=lib/forge-std/src/"
+  ]
+}
