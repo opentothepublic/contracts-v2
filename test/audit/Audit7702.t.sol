@@ -58,7 +58,7 @@ contract Audit7702Test is Test {
         assertGt(alice.code.length, 0, "delegation attached");
 
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, sig);
 
         // Direct path still works (msg.sender == alice via the delegate or a plain tx from alice)

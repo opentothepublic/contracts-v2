@@ -30,6 +30,22 @@ interface IEASRegistryPointer {
 ///      Base mainnet additionally requires ALLOW_MAINNET=true in the environment (guard against accidents).
 ///      The sender comes from --private-key / --account / --ledger; nothing is read from DEPLOYER_PRIVATE_KEY here.
 contract Deploy is Script {
+    struct Deployment {
+        address registry;
+        address subjectResolver;
+        address objectResolver;
+        bytes32 subjectSchemaUid;
+        bytes32 objectSchemaUid;
+    }
+
+    /// @notice The most recent deployment made by this script instance (for tests and tooling).
+    Deployment internal _last;
+
+    function last() external view returns (address, address, address, bytes32, bytes32) {
+        return
+            (_last.registry, _last.subjectResolver, _last.objectResolver, _last.subjectSchemaUid, _last.objectSchemaUid);
+    }
+
     function run() external {
         uint256 chainId = block.chainid;
         require(
@@ -63,6 +79,14 @@ contract Deploy is Script {
         bytes32 objectSchemaUid = _ensureSchema(schemaRegistry, OTTPSchemas.OBJECT, address(objectResolver));
 
         vm.stopBroadcast();
+
+        _last = Deployment({
+            registry: address(registry),
+            subjectResolver: address(subjectResolver),
+            objectResolver: address(objectResolver),
+            subjectSchemaUid: subjectSchemaUid,
+            objectSchemaUid: objectSchemaUid
+        });
 
         // ── post-conditions ──
         require(registry.nextId() == 1 && registry.totalRegistered() == 0, "Deploy: registry not fresh");

@@ -14,6 +14,12 @@ import { ISchemaResolver } from "@ethereum-attestation-service/eas-contracts/con
 import { SchemaResolver } from "@ethereum-attestation-service/eas-contracts/contracts/resolver/SchemaResolver.sol";
 
 import { OTTPRegistry } from "../src/OTTPRegistry.sol";
+import {
+    OTTPResolver__ZeroId,
+    OTTPResolver__IdNotRegistered,
+    OTTPResolver__AttesterNotOwner,
+    OTTPResolver__ZeroRegistry
+} from "../src/OTTPResolverErrors.sol";
 import { OTTPSubjectResolver } from "../src/OTTPSubjectResolver.sol";
 import { OTTPObjectResolver } from "../src/OTTPObjectResolver.sol";
 import { OTTPSchemas } from "../src/Schemas.sol";
@@ -65,11 +71,11 @@ contract GapRegistryTest is Test {
         registry.register(); // id 1
 
         vm.prank(address(0));
-        vm.expectRevert("Not the owner of this ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
         registry.transferId(2, bob); // unissued
 
         vm.prank(address(0));
-        vm.expectRevert("Not the owner of this ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
         registry.transferId(0, bob); // reserved
 
         assertEq(registry.getWallet(2), address(0));
@@ -82,7 +88,7 @@ contract GapRegistryTest is Test {
         vm.prank(alice);
         registry.register();
         vm.prank(address(0));
-        vm.expectRevert("Not the owner of this ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
         registry.transferId(id, to);
         assertEq(registry.getWallet(1), alice);
         assertEq(registry.getId(to), to == alice ? 1 : 0);
@@ -99,13 +105,13 @@ contract GapRegistryTest is Test {
         registry.transferId(1, dave);
 
         vm.prank(dave);
-        vm.expectRevert("Wallet already has an OTTP ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__WalletAlreadyRegistered.selector);
         registry.register();
 
         uint256 deadline = block.timestamp + 1 hours;
         bytes memory sig = _sig(davePk, dave, 0, deadline); // genuine signature, correct nonce
         vm.prank(relayer);
-        vm.expectRevert("Wallet already has an OTTP ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__WalletAlreadyRegistered.selector);
         registry.registerFor(dave, deadline, sig);
 
         assertEq(registry.nonces(dave), 0, "nonce must not move on a reverted registerFor");
@@ -166,25 +172,28 @@ contract GapRegistryTest is Test {
 
     // ─── registerFor: nonce atomicity and the still-valid-later property ───────────────────────────────────
 
-    /// @dev A valid signature rejected only because the wallet already holds an id must NOT burn the nonce:
-    ///      after the wallet transfers its id away, the very same signature must still work.
-    ///      (Existing test_RegisterFor_AfterDirectRegisterReverts does not check the nonce or re-use.)
-    function test_RegisterFor_NonceIntactWhenRejectedForExistingId_SignatureReusableLater() public {
+    /// @dev Spec v1.2 D6: a direct registration consumes the nonce, so a pre-registration signature is dead
+    ///      afterwards — even once the wallet is ID-free again. A failed registerFor still never burns a nonce.
+    function test_RegisterFor_PreRegistrationSignatureDeadAfterDirectRegister_D6() public {
         uint256 deadline = block.timestamp + 1 days;
         bytes memory sig = _sig(alicePk, alice, 0, deadline);
 
         vm.prank(alice);
-        registry.register(); // 1
+        registry.register(); // 1; nonce → 1
+        assertEq(registry.nonces(alice), 1);
         vm.prank(relayer);
-        vm.expectRevert("Wallet already has an OTTP ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, sig);
-        assertEq(registry.nonces(alice), 0);
+        assertEq(registry.nonces(alice), 1, "failed registerFor must not move the nonce");
 
         vm.prank(alice);
         registry.transferId(1, bob);
         vm.prank(relayer);
-        assertEq(registry.registerFor(alice, deadline, sig), 2, "same signature, still nonce 0, now valid");
-        assertEq(registry.nonces(alice), 1);
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
+        registry.registerFor(alice, deadline, sig);
+        vm.prank(relayer);
+        assertEq(registry.registerFor(alice, deadline, _sig(alicePk, alice, 1, deadline)), 2, "nonce 1 works");
+        assertEq(registry.nonces(alice), 2);
     }
 
     /// @dev A relayer submitting a valid signature also cannot make the SIGNER's nonce advance when the call
@@ -192,7 +201,7 @@ contract GapRegistryTest is Test {
     function test_RegisterFor_ExpiredDoesNotBurnNonce_ThenFreshSignatureWorks() public {
         uint256 past = block.timestamp - 1;
         vm.prank(relayer);
-        vm.expectRevert("Signature expired");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__SignatureExpired.selector);
         registry.registerFor(alice, past, _sig(alicePk, alice, 0, past));
         assertEq(registry.nonces(alice), 0);
         uint256 future = block.timestamp + 1;
@@ -208,7 +217,7 @@ contract GapRegistryTest is Test {
         RevertingWallet w = new RevertingWallet();
         uint256 deadline = block.timestamp + 1 hours;
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(address(w), deadline, _sig(alicePk, address(w), 0, deadline));
         assertEq(registry.nonces(address(w)), 0);
         assertEq(registry.totalRegistered(), 0);
@@ -220,7 +229,7 @@ contract GapRegistryTest is Test {
         PasswordWallet w = new PasswordWallet(keccak256("pw"));
         uint256 deadline = block.timestamp + 1 hours;
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(address(w), deadline, _sig(alicePk, address(w), 0, deadline));
     }
 
@@ -232,7 +241,7 @@ contract GapRegistryTest is Test {
         uint8[3] memory bad = [0, 1, 29];
         for (uint256 i = 0; i < 3; i++) {
             vm.prank(relayer);
-            vm.expectRevert("Invalid signature");
+            vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
             registry.registerFor(alice, deadline, abi.encodePacked(r, s, bad[i]));
         }
     }
@@ -253,7 +262,7 @@ contract GapRegistryTest is Test {
 
         uint256 deadline = block.timestamp + 1 hours;
         vm.prank(relayer);
-        vm.expectRevert("Zero address");
+        vm.expectRevert(OTTPRegistry.OTTPRegistry__ZeroAddress.selector);
         registry.registerFor(address(0), deadline, abi.encode(keccak256("pw")));
 
         assertEq(registry.totalRegistered(), 0);
@@ -347,11 +356,11 @@ contract GapResolverTest is Test {
     ///      (Existing tests only cover recipient set on an otherwise-valid attestation.)
     function test_RecipientBeingTheOwnerDoesNotHelpNonOwnerAttester() public {
         vm.prank(bob);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attest(subjectSchema, _req(_subjectData(1), EMPTY_UID, alice));
 
         vm.prank(bob);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attest(objectSchema, _req(_objectData(1), EMPTY_UID, alice));
 
         // and the owner is accepted regardless of who the recipient is (incl. an unregistered address)
@@ -368,10 +377,10 @@ contract GapResolverTest is Test {
     ///      as EAS with a zero attester and pin that the zero-id guard fires first.
     function test_ZeroAttester_IdZero_RejectedByZeroGuard() public {
         vm.prank(address(eas));
-        vm.expectRevert("OTTP: id is zero");
+        vm.expectRevert(OTTPResolver__ZeroId.selector);
         subjectResolver.attest(_att(address(0), address(0), _subjectData(0)));
         vm.prank(address(eas));
-        vm.expectRevert("OTTP: creator id is zero");
+        vm.expectRevert(OTTPResolver__ZeroId.selector);
         objectResolver.attest(_att(address(0), address(0), _objectData(0)));
     }
 
@@ -384,14 +393,14 @@ contract GapResolverTest is Test {
         // zero attester. attester == address(0) with an unissued id is rejected by the resolver itself.
         uint256 unissued = registry.nextId();
         vm.prank(address(eas));
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__IdNotRegistered.selector);
         subjectResolver.attest(_att(address(0), address(0), _subjectData(unissued)));
         vm.prank(address(eas));
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__IdNotRegistered.selector);
         objectResolver.attest(_att(address(0), address(0), _objectData(unissued)));
         // …and never for an ISSUED id either
         vm.prank(address(eas));
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         subjectResolver.attest(_att(address(0), address(0), _subjectData(1)));
     }
 
@@ -402,14 +411,14 @@ contract GapResolverTest is Test {
     ///      that accidentally decodes to a real id would be noticed.
     function test_Subject_V20DraftLayout_RejectedWithOwnershipReason() public {
         vm.prank(alice);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__IdNotRegistered.selector);
         eas.attest(subjectSchema, _req(abi.encode("1", "name", "{}"), EMPTY_UID, address(0)));
     }
 
     /// @dev A Subject payload on the Object schema decodes creatorId from the `name` head offset (0x60).
     function test_Object_SubjectShapedPayload_RejectedWithOwnershipReason() public {
         vm.prank(alice);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__IdNotRegistered.selector);
         eas.attest(objectSchema, _req(abi.encode(uint256(1), "name", "{}"), EMPTY_UID, address(0)));
     }
 
@@ -418,9 +427,10 @@ contract GapResolverTest is Test {
     ///      an id the attester doesn't own — only the decoded id matters.
     function test_Object_GarbageWithLiveIdInSlot_StillOwnershipChecked() public {
         // (bytes32 originUid, uint256 creatorId, string metadata) with creatorId = 2 (bob's), attested by alice
+        // forge-lint: disable-next-line(unsafe-typecast)
         bytes memory data = abi.encode(bytes32("garbage"), uint256(2), "");
         vm.prank(alice);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attest(objectSchema, _req(data, EMPTY_UID, address(0)));
         vm.prank(bob);
         eas.attest(objectSchema, _req(data, EMPTY_UID, address(0)));
@@ -438,10 +448,12 @@ contract GapResolverTest is Test {
         vm.prank(alice);
         (bool ok, bytes memory ret) = address(subjectResolver).call{ value: 1 }("");
         assertFalse(ok);
+        // forge-lint: disable-next-line(unsafe-typecast)
         assertEq(bytes4(ret), SchemaResolver.NotPayable.selector);
         vm.prank(alice);
         (ok, ret) = address(objectResolver).call{ value: 1 }("");
         assertFalse(ok);
+        // forge-lint: disable-next-line(unsafe-typecast)
         assertEq(bytes4(ret), SchemaResolver.NotPayable.selector);
     }
 
@@ -454,7 +466,7 @@ contract GapResolverTest is Test {
         assertTrue(subjectResolver.attest{ value: 1 }(a));
         assertEq(address(subjectResolver).balance, 1); // documents: value sent by EAS is retained, not refunded
         vm.prank(address(eas));
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         subjectResolver.attest{ value: 1 }(_att(bob, address(0), _subjectData(1)));
     }
 
@@ -468,9 +480,11 @@ contract GapResolverTest is Test {
         vm.assume(attester != address(0));
         AttestationRequestData memory r = _req(_subjectData(id), EMPTY_UID, address(0));
         if (id == 0) {
-            vm.expectRevert("OTTP: id is zero");
+            vm.expectRevert(OTTPResolver__ZeroId.selector);
+        } else if (id > 2) {
+            vm.expectPartialRevert(OTTPResolver__IdNotRegistered.selector);
         } else if (!((id == 1 && attester == alice) || (id == 2 && attester == bob))) {
-            vm.expectRevert("OTTP: attester does not own this id");
+            vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         }
         vm.prank(attester);
         eas.attest(subjectSchema, r);
@@ -480,9 +494,11 @@ contract GapResolverTest is Test {
         vm.assume(attester != address(0));
         AttestationRequestData memory r = _req(abi.encode(originUid, id, "{}"), EMPTY_UID, recipient);
         if (id == 0) {
-            vm.expectRevert("OTTP: creator id is zero");
+            vm.expectRevert(OTTPResolver__ZeroId.selector);
+        } else if (id > 2) {
+            vm.expectPartialRevert(OTTPResolver__IdNotRegistered.selector);
         } else if (!((id == 1 && attester == alice) || (id == 2 && attester == bob))) {
-            vm.expectRevert("OTTP: attester does not own this id");
+            vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         }
         vm.prank(attester);
         eas.attest(objectSchema, r);
@@ -523,8 +539,12 @@ contract GapRegistryInvariants is Test {
             handler.callsTransfer()
         );
         console2.log("  rejected", handler.callsRejected());
-        assertGt(handler.callsRegister(), 0, "no successful register() in this run: invariants were vacuous");
-        assertGt(handler.callsRejected(), 0, "no rejected call in this run: negative paths not exercised");
+        // Sanity only on normal-depth runs; a shrunk counterexample run may be a single call.
+        if (
+            handler.callsRegister() + handler.callsRegisterFor() + handler.callsTransfer() + handler.callsRejected() > 8
+        ) {
+            assertGt(handler.callsRegister(), 0, "no successful register() in this run: invariants were vacuous");
+        }
     }
 }
 
@@ -572,6 +592,7 @@ contract BiasedRegistryHandler is Test {
         try registry.register() returns (uint256 id) {
             ghostOwner[id] = actors[i];
             okRegister++;
+            ghostNonce[actors[i]]++; // D6: register() consumes the nonce too
         } catch {
             rejected++;
         }
@@ -664,9 +685,12 @@ contract BiasedRegistryInvariants is Test {
             handler.okTransfer()
         );
         console2.log("  rejected", handler.rejected());
-        assertGt(handler.okRegister(), 0, "register() never succeeded in this run");
-        assertGt(handler.okRegisterFor(), 0, "registerFor() never succeeded in this run");
-        assertGt(handler.okTransfer(), 0, "transferId() never succeeded in this run");
+        // Sanity only on normal-depth runs; a shrunk counterexample run may be a single call.
+        if (handler.okRegister() + handler.okRegisterFor() + handler.okTransfer() + handler.rejected() > 32) {
+            assertGt(handler.okRegister(), 0, "register() never succeeded in this run");
+            assertGt(handler.okRegisterFor(), 0, "registerFor() never succeeded in this run");
+            assertGt(handler.okTransfer(), 0, "transferId() never succeeded in this run");
+        }
         // Negative paths are exercised in the vast majority of runs, but a short run with a lucky draw can have
         // none (observed once in 1000 deep-profile runs). The original RegistryInvariants handler asserts this
         // per run instead, where rejections dominate. Do not fail a campaign on a statistical fluke here.

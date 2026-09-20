@@ -13,6 +13,12 @@ import {
 import { ISchemaResolver } from "@ethereum-attestation-service/eas-contracts/contracts/resolver/ISchemaResolver.sol";
 
 import { OTTPRegistry } from "../../src/OTTPRegistry.sol";
+import {
+    OTTPResolver__ZeroId,
+    OTTPResolver__IdNotRegistered,
+    OTTPResolver__AttesterNotOwner,
+    OTTPResolver__ZeroRegistry
+} from "../../src/OTTPResolverErrors.sol";
 import { OTTPSubjectResolver } from "../../src/OTTPSubjectResolver.sol";
 import { OTTPObjectResolver } from "../../src/OTTPObjectResolver.sol";
 import { OTTPSchemas } from "../../src/Schemas.sol";
@@ -34,12 +40,6 @@ contract ProxyLike {
 
     function transferOut(OTTPRegistry r, uint256 id, address to) external {
         r.transferId(id, to);
-    }
-}
-
-contract Bomb {
-    constructor(address payable to) payable {
-        selfdestruct(to);
     }
 }
 
@@ -97,12 +97,11 @@ contract AuditResolversTest is Test {
             assertEq(uint256(w0), 1, "resolver accepted alice for an id that is not word 0 == 1");
         } catch (bytes memory reason) {
             // Either abi.decode failed, or the id check failed; if the id check failed, w0 must not be 1
-            if (
-                keccak256(reason)
-                    == keccak256(abi.encodeWithSignature("Error(string)", "OTTP: attester does not own this id"))
-            ) {
+            // forge-lint: disable-next-line(unsafe-typecast)
+            bytes4 sel = bytes4(reason);
+            if (sel == OTTPResolver__AttesterNotOwner.selector || sel == OTTPResolver__IdNotRegistered.selector) {
                 assertTrue(uint256(w0) != 1);
-            } else if (keccak256(reason) == keccak256(abi.encodeWithSignature("Error(string)", "OTTP: id is zero"))) {
+            } else if (sel == OTTPResolver__ZeroId.selector) {
                 assertEq(uint256(w0), 0);
             }
         }
@@ -112,10 +111,9 @@ contract AuditResolversTest is Test {
             assertTrue(ok);
             assertEq(uint256(w1), 1);
         } catch (bytes memory reason) {
-            if (
-                keccak256(reason)
-                    == keccak256(abi.encodeWithSignature("Error(string)", "OTTP: attester does not own this id"))
-            ) {
+            // forge-lint: disable-next-line(unsafe-typecast)
+            bytes4 sel = bytes4(reason);
+            if (sel == OTTPResolver__AttesterNotOwner.selector || sel == OTTPResolver__IdNotRegistered.selector) {
                 assertTrue(uint256(w1) != 1);
             }
         }
@@ -128,7 +126,13 @@ contract AuditResolversTest is Test {
     function test_R2_NonCanonicalEncodings_AcceptedOnchain() public {
         // (a) both strings alias the same tail; length 4, "abcd"
         bytes memory aliased = bytes.concat(
-            bytes32(uint256(1)), bytes32(uint256(0x60)), bytes32(uint256(0x60)), bytes32(uint256(4)), bytes32("abcd")
+            // forge-lint: disable-next-line(unsafe-typecast)
+            bytes32(uint256(1)),
+            bytes32(uint256(0x60)),
+            bytes32(uint256(0x60)),
+            bytes32(uint256(4)),
+            // forge-lint: disable-next-line(unsafe-typecast)
+            bytes32("abcd")
         );
         vm.prank(alice);
         eas.attest(subjectSchema, _req(aliased));
@@ -171,10 +175,16 @@ contract AuditResolversTest is Test {
 
         // (f) BUT the id check always ran on word 0: same encodings with bob's id are rejected for alice
         aliased = bytes.concat(
-            bytes32(uint256(2)), bytes32(uint256(0x60)), bytes32(uint256(0x60)), bytes32(uint256(4)), bytes32("abcd")
+            // forge-lint: disable-next-line(unsafe-typecast)
+            bytes32(uint256(2)),
+            bytes32(uint256(0x60)),
+            bytes32(uint256(0x60)),
+            bytes32(uint256(4)),
+            // forge-lint: disable-next-line(unsafe-typecast)
+            bytes32("abcd")
         );
         vm.prank(alice);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attest(subjectSchema, _req(aliased));
 
         // (g) out-of-bounds offset reverts (no panic-string, plain revert from abi.decode)
@@ -190,7 +200,7 @@ contract AuditResolversTest is Test {
         ProxyLike proxy = new ProxyLike(eas);
         // alice attests via the proxy → attester = proxy → rejected
         vm.prank(alice);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         proxy.attestVia(subjectSchema, _req(abi.encode(uint256(1), "alice", "{}")));
 
         // alice (mistakenly) parks her ID in the proxy
@@ -207,9 +217,9 @@ contract AuditResolversTest is Test {
         assertEq(registry.getWallet(1), mallory, "id stolen through a permissionless proxy holding it");
     }
 
-    // ── R4: ETH can be force-sent to a resolver (selfdestruct) and is then stuck forever; harmless (INFO). ──
+    // ── R4: ETH can be force-sent to a resolver (selfdestruct / pre-funding) and is then stuck forever; harmless (INFO). ──
     function test_R4_ForceSentEthIsStuckButHarmless() public {
-        new Bomb{ value: 1 ether }(payable(address(subjectResolver)));
+        vm.deal(address(subjectResolver), 1 ether); // stands in for a selfdestruct force-send
         assertEq(address(subjectResolver).balance, 1 ether);
         // no effect on validation
         vm.prank(alice);
@@ -242,14 +252,14 @@ contract AuditResolversTest is Test {
     //       attester == address(0) with an unissued id is rejected by the resolver itself, independent of EAS. ──
     function test_R6_ZeroAttester_RejectedForUnissuedId() public {
         vm.prank(address(eas));
-        vm.expectRevert("OTTP: id is zero");
+        vm.expectRevert(OTTPResolver__ZeroId.selector);
         subjectResolver.attest(_att(address(0), abi.encode(uint256(0), "", "")));
 
         vm.prank(address(eas));
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__IdNotRegistered.selector);
         subjectResolver.attest(_att(address(0), abi.encode(uint256(999), "", "")));
         vm.prank(address(eas));
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__IdNotRegistered.selector);
         objectResolver.attest(_att(address(0), abi.encode(bytes32(0), uint256(type(uint256).max), "")));
     }
 

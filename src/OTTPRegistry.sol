@@ -19,11 +19,24 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
     mapping(uint256 id => address wallet) public idToWallet;
     /// @notice ID per wallet (0 = none).
     mapping(address wallet => uint256 id) public walletToId;
-    /// @notice EIP-712 nonces for registerFor signatures.
+    /// @notice EIP-712 nonces for registerFor signatures. Consumed by every registration (either path).
     mapping(address wallet => uint256 nonce) public nonces;
 
     /// @dev keccak256("Register(address wallet,uint256 nonce,uint256 deadline)")
     bytes32 public constant REGISTER_TYPEHASH = keccak256("Register(address wallet,uint256 nonce,uint256 deadline)");
+
+    /// @notice Registration target is the zero address.
+    error OTTPRegistry__ZeroAddress();
+    /// @notice The wallet already holds an OTTP ID (one ID per wallet).
+    error OTTPRegistry__WalletAlreadyRegistered(address wallet, uint256 existingId);
+    /// @notice msg.sender is not the current wallet of the ID (or the ID is unissued).
+    error OTTPRegistry__NotOwner(uint256 id, address caller);
+    /// @notice transferId target already holds an OTTP ID (no consolidation, by design).
+    error OTTPRegistry__TargetAlreadyRegistered(address target, uint256 existingId);
+    /// @notice registerFor deadline has passed.
+    error OTTPRegistry__SignatureExpired(uint256 deadline, uint256 blockTimestamp);
+    /// @notice registerFor signature did not verify for `wallet` (ECDSA or ERC-1271).
+    error OTTPRegistry__InvalidSignature(address wallet);
 
     /// @notice A new ID was claimed (both registration paths).
     event Registered(uint256 indexed id, address indexed wallet);
@@ -44,19 +57,21 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
     /// @dev Sponsored (gasless) registration: any relayer may submit and pays gas. The relayer never receives
     ///      an ID as a side effect — the only outcome any submitter can produce is `wallet` getting registered.
     ///      Supports EOAs (ECDSA) and smart-contract wallets (ERC-1271) via OpenZeppelin SignatureChecker.
-    ///      Replay protection: per-wallet nonce (consumed on success), deadline, and the chain/contract-bound domain.
+    ///      Replay protection: per-wallet nonce (consumed by EVERY registration, either path — spec v1.2 D6),
+    ///      deadline, and the chain/contract-bound domain.
     /// @param wallet The wallet to register (the EIP-712 signer).
     /// @param deadline Unix timestamp after which the signature is no longer valid.
     /// @param signature EIP-712 signature over Register(wallet, nonces[wallet], deadline).
     /// @return id The newly issued ID.
     function registerFor(address wallet, uint256 deadline, bytes calldata signature) external returns (uint256 id) {
-        require(block.timestamp <= deadline, "Signature expired");
+        // forge-lint: disable-next-line(block-timestamp)
+        if (block.timestamp > deadline) revert OTTPRegistry__SignatureExpired(deadline, block.timestamp);
 
-        uint256 nonce = nonces[wallet];
-        nonces[wallet] = nonce + 1;
-
-        bytes32 digest = _hashTypedDataV4(keccak256(abi.encode(REGISTER_TYPEHASH, wallet, nonce, deadline)));
-        require(SignatureChecker.isValidSignatureNow(wallet, digest, signature), "Invalid signature");
+        // Read the nonce BEFORE _register, which is what consumes it.
+        bytes32 digest = _hashTypedDataV4(keccak256(abi.encode(REGISTER_TYPEHASH, wallet, nonces[wallet], deadline)));
+        if (!SignatureChecker.isValidSignatureNow(wallet, digest, signature)) {
+            revert OTTPRegistry__InvalidSignature(wallet);
+        }
 
         return _register(wallet);
     }
@@ -68,11 +83,12 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
     /// @param newWallet The receiving wallet. Must be non-zero and hold no ID.
     function transferId(uint256 id, address newWallet) external {
         // Unissued IDs map to address(0); the explicit non-zero check keeps this sound even for a hypothetical
-        // zero-address sender (defense-in-depth beyond the spec's single equality check).
+        // zero-address sender (spec v1.2 D1: defense-in-depth beyond a single equality check).
         address owner = idToWallet[id];
-        require(owner != address(0) && owner == msg.sender, "Not the owner of this ID");
-        require(newWallet != address(0), "Cannot transfer to zero address");
-        require(walletToId[newWallet] == 0, "Target wallet already has an OTTP ID");
+        if (owner == address(0) || owner != msg.sender) revert OTTPRegistry__NotOwner(id, msg.sender);
+        if (newWallet == address(0)) revert OTTPRegistry__ZeroAddress();
+        uint256 existing = walletToId[newWallet];
+        if (existing != 0) revert OTTPRegistry__TargetAlreadyRegistered(newWallet, existing);
 
         walletToId[msg.sender] = 0;
         idToWallet[id] = newWallet;
@@ -96,15 +112,18 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
         return nextId - 1;
     }
 
-    /// @dev Shared issuance path for register() and registerFor().
+    /// @dev Shared issuance path for register() and registerFor(). Consumes the wallet's nonce on BOTH paths
+    ///      (spec v1.2 D6), so any registerFor signature issued before a registration is dead after it.
     function _register(address wallet) internal returns (uint256 id) {
-        require(wallet != address(0), "Zero address");
-        require(walletToId[wallet] == 0, "Wallet already has an OTTP ID");
+        if (wallet == address(0)) revert OTTPRegistry__ZeroAddress();
+        uint256 existing = walletToId[wallet];
+        if (existing != 0) revert OTTPRegistry__WalletAlreadyRegistered(wallet, existing);
 
         id = nextId;
         nextId = id + 1;
         idToWallet[id] = wallet;
         walletToId[wallet] = id;
+        nonces[wallet] += 1;
 
         emit Registered(id, wallet);
     }

@@ -77,16 +77,18 @@ contract OTTPRegistryTest is Test {
     function test_DoubleRegisterReverts() public {
         vm.startPrank(alice);
         registry.register();
-        vm.expectRevert("Wallet already has an OTTP ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__WalletAlreadyRegistered.selector);
         registry.register();
         vm.stopPrank();
         assertEq(registry.totalRegistered(), 1);
     }
 
-    function test_RegisterDoesNotTouchNonce() public {
+    function test_RegisterConsumesNonce_D6() public {
+        // Spec v1.2 D6: every registration consumes the wallet's nonce, so pre-registration signatures die.
         vm.prank(alice);
         registry.register();
-        assertEq(registry.nonces(alice), 0);
+        assertEq(registry.nonces(alice), 1);
+        assertEq(registry.nonces(bob), 0);
     }
 
     // ─── transferId ────────────────────────────────────────────────────────────────────────────────────────
@@ -122,7 +124,7 @@ contract OTTPRegistryTest is Test {
         vm.prank(alice);
         registry.register();
         vm.prank(bob);
-        vm.expectRevert("Not the owner of this ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
         registry.transferId(1, carol);
         assertEq(registry.getWallet(1), alice);
     }
@@ -131,7 +133,7 @@ contract OTTPRegistryTest is Test {
         vm.prank(alice);
         registry.register();
         vm.prank(alice);
-        vm.expectRevert("Cannot transfer to zero address");
+        vm.expectRevert(OTTPRegistry.OTTPRegistry__ZeroAddress.selector);
         registry.transferId(1, address(0));
     }
 
@@ -141,7 +143,7 @@ contract OTTPRegistryTest is Test {
         vm.prank(bob);
         registry.register();
         vm.prank(alice);
-        vm.expectRevert("Target wallet already has an OTTP ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__TargetAlreadyRegistered.selector);
         registry.transferId(1, bob);
         assertEq(registry.getWallet(1), alice);
         assertEq(registry.getWallet(2), bob);
@@ -151,7 +153,7 @@ contract OTTPRegistryTest is Test {
         vm.prank(alice);
         registry.register();
         vm.prank(alice);
-        vm.expectRevert("Target wallet already has an OTTP ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__TargetAlreadyRegistered.selector);
         registry.transferId(1, alice);
     }
 
@@ -159,13 +161,13 @@ contract OTTPRegistryTest is Test {
         vm.prank(alice);
         registry.register();
         vm.prank(alice);
-        vm.expectRevert("Not the owner of this ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
         registry.transferId(2, bob);
         vm.prank(alice);
-        vm.expectRevert("Not the owner of this ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
         registry.transferId(0, bob);
         vm.prank(alice);
-        vm.expectRevert("Not the owner of this ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
         registry.transferId(type(uint256).max, bob);
     }
 
@@ -175,7 +177,7 @@ contract OTTPRegistryTest is Test {
         vm.prank(bob);
         registry.register();
         vm.prank(alice);
-        vm.expectRevert("Not the owner of this ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
         registry.transferId(2, carol);
     }
 
@@ -192,10 +194,10 @@ contract OTTPRegistryTest is Test {
         assertEq(registry.getId(alice), 0);
         // the former owners cannot move it anymore
         vm.prank(alice);
-        vm.expectRevert("Not the owner of this ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
         registry.transferId(1, alice);
         vm.prank(bob);
-        vm.expectRevert("Not the owner of this ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
         registry.transferId(1, bob);
     }
 
@@ -246,7 +248,7 @@ contract OTTPRegistryTest is Test {
         uint256 deadline = block.timestamp - 1;
         bytes memory sig = _sig(alicePk, alice, 0, deadline);
         vm.prank(relayer);
-        vm.expectRevert("Signature expired");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__SignatureExpired.selector);
         registry.registerFor(alice, deadline, sig);
         assertEq(registry.nonces(alice), 0);
     }
@@ -256,7 +258,7 @@ contract OTTPRegistryTest is Test {
         bytes memory sig = _sig(alicePk, alice, 0, deadline);
         vm.warp(deadline + 1);
         vm.prank(relayer);
-        vm.expectRevert("Signature expired");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__SignatureExpired.selector);
         registry.registerFor(alice, deadline, sig);
     }
 
@@ -264,7 +266,7 @@ contract OTTPRegistryTest is Test {
         uint256 deadline = block.timestamp + 1 hours;
         bytes memory sig = _sig(bobPk, alice, 0, deadline); // bob signs for alice
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, sig);
         assertEq(registry.totalRegistered(), 0);
     }
@@ -273,10 +275,10 @@ contract OTTPRegistryTest is Test {
         uint256 deadline = block.timestamp + 1 hours;
         bytes memory sig = _sig(alicePk, alice, 0, deadline); // alice signs for herself…
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(bob, deadline, sig); // …relayer tries to register bob with it
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(relayer, deadline, sig); // …or itself
         assertEq(registry.totalRegistered(), 0);
     }
@@ -285,7 +287,7 @@ contract OTTPRegistryTest is Test {
         uint256 deadline = block.timestamp + 1 hours;
         bytes memory sig = _sig(alicePk, alice, 0, deadline);
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline + 1, sig);
     }
 
@@ -293,7 +295,7 @@ contract OTTPRegistryTest is Test {
         uint256 deadline = block.timestamp + 1 hours;
         bytes memory sig = _sig(alicePk, alice, 1, deadline); // current nonce is 0
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, sig);
     }
 
@@ -305,13 +307,13 @@ contract OTTPRegistryTest is Test {
 
         // Same signature again: nonce moved on AND the wallet already holds an ID.
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, sig);
 
         // A fresh valid signature with the new nonce is still rejected: one ID per wallet.
         bytes memory sig2 = _sig(alicePk, alice, 1, deadline);
         vm.prank(relayer);
-        vm.expectRevert("Wallet already has an OTTP ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__WalletAlreadyRegistered.selector);
         registry.registerFor(alice, deadline, sig2);
         assertEq(registry.totalRegistered(), 1);
     }
@@ -319,7 +321,7 @@ contract OTTPRegistryTest is Test {
     function test_RegisterFor_NonceNotConsumedOnFailure() public {
         uint256 deadline = block.timestamp + 1 hours;
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, _sig(bobPk, alice, 0, deadline));
         assertEq(registry.nonces(alice), 0);
         // the correct signature still works afterwards
@@ -332,10 +334,117 @@ contract OTTPRegistryTest is Test {
         vm.prank(alice);
         registry.register();
         uint256 deadline = block.timestamp + 1 hours;
-        bytes memory sig = _sig(alicePk, alice, 0, deadline);
+        // a signature made before the direct registration (nonce 0) is dead: the nonce moved to 1 (D6)
         vm.prank(relayer);
-        vm.expectRevert("Wallet already has an OTTP ID");
-        registry.registerFor(alice, deadline, sig);
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
+        registry.registerFor(alice, deadline, _sig(alicePk, alice, 0, deadline));
+        // and a fresh signature at the current nonce still cannot double-register
+        vm.prank(relayer);
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__WalletAlreadyRegistered.selector);
+        registry.registerFor(alice, deadline, _sig(alicePk, alice, 1, deadline));
+        assertEq(registry.nonces(alice), 1, "failed registerFor must not move the nonce");
+    }
+
+    // ─── D6: stale registerFor signatures (spec v1.2) ──────────────────────────────────────────────────────
+
+    /// @dev (a) sign at nonce 0, register directly, transfer the ID away, replay the old signature → dead.
+    function test_D6a_StaleSignature_DeadAfterDirectRegisterAndTransfer() public {
+        uint256 deadline = type(uint256).max; // the worst case: a relayer UI that asked for no expiry
+        bytes memory stale = _sig(alicePk, alice, 0, deadline);
+        vm.prank(alice);
+        registry.register(); // nonce 0 → 1
+        vm.prank(alice);
+        registry.transferId(1, bob); // alice is ID-free again
+        assertEq(registry.getId(alice), 0);
+
+        vm.prank(relayer);
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
+        registry.registerFor(alice, deadline, stale);
+        assertEq(registry.getId(alice), 0, "stale signature must not re-register the old wallet");
+        assertEq(registry.totalRegistered(), 1);
+        // bob can still hand the ID back to alice (the griefing path from the audit is closed)
+        vm.prank(bob);
+        registry.transferId(1, alice);
+        assertEq(registry.getId(alice), 1);
+    }
+
+    /// @dev (b) same, but the first registration went through registerFor.
+    function test_D6b_StaleSignature_DeadAfterSponsoredRegisterAndTransfer() public {
+        uint256 deadline = type(uint256).max;
+        bytes memory first = _sig(alicePk, alice, 0, deadline);
+        bytes memory alsoAtNonce0 = _sig(alicePk, alice, 0, deadline - 1); // a second signature at the same nonce
+        vm.prank(relayer);
+        registry.registerFor(alice, deadline, first); // nonce 0 → 1
+        vm.prank(alice);
+        registry.transferId(1, bob);
+
+        vm.prank(relayer);
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
+        registry.registerFor(alice, deadline, first);
+        vm.prank(relayer);
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
+        registry.registerFor(alice, deadline - 1, alsoAtNonce0);
+        assertEq(registry.getId(alice), 0);
+        // only a signature at the CURRENT nonce (1) can register alice again, and it yields a new ID
+        vm.prank(relayer);
+        assertEq(registry.registerFor(alice, deadline, _sig(alicePk, alice, 1, deadline)), 2);
+    }
+
+    /// @dev (c) the nonce increments exactly once per registration on each path, and never on failure.
+    function test_D6c_NonceIncrementsExactlyOncePerRegistration() public {
+        uint256 deadline = block.timestamp + 1 hours;
+        assertEq(registry.nonces(alice), 0);
+        vm.prank(alice);
+        registry.register();
+        assertEq(registry.nonces(alice), 1, "register(): +1");
+        vm.prank(alice);
+        registry.transferId(1, carol);
+        assertEq(registry.nonces(alice), 1, "transferId: unchanged");
+        vm.prank(relayer);
+        registry.registerFor(alice, deadline, _sig(alicePk, alice, 1, deadline));
+        assertEq(registry.nonces(alice), 2, "registerFor(): +1");
+        vm.prank(alice);
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__WalletAlreadyRegistered.selector);
+        registry.register();
+        assertEq(registry.nonces(alice), 2, "failed register(): unchanged");
+        vm.prank(relayer);
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__WalletAlreadyRegistered.selector);
+        registry.registerFor(alice, deadline, _sig(alicePk, alice, 2, deadline));
+        assertEq(registry.nonces(alice), 2, "failed registerFor(): unchanged");
+        assertEq(registry.nonces(carol), 0, "transfer recipient: untouched");
+        assertEq(registry.nonces(relayer), 0);
+    }
+
+    /// @dev D4: custom error parameters carry the debugging context the SDK will decode.
+    function test_D4_CustomErrorParameters() public {
+        vm.prank(alice);
+        registry.register();
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__WalletAlreadyRegistered.selector, alice, 1));
+        registry.register();
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__NotOwner.selector, 1, bob));
+        registry.transferId(1, carol);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__NotOwner.selector, 7, alice));
+        registry.transferId(7, carol);
+        vm.prank(alice);
+        vm.expectRevert(OTTPRegistry.OTTPRegistry__ZeroAddress.selector);
+        registry.transferId(1, address(0));
+        vm.prank(bob);
+        registry.register();
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__TargetAlreadyRegistered.selector, bob, 2));
+        registry.transferId(1, bob);
+        uint256 deadline = block.timestamp - 1;
+        vm.prank(relayer);
+        vm.expectRevert(
+            abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__SignatureExpired.selector, deadline, block.timestamp)
+        );
+        registry.registerFor(carol, deadline, "");
+        vm.prank(relayer);
+        vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__InvalidSignature.selector, carol));
+        registry.registerFor(carol, block.timestamp + 1, "");
     }
 
     function test_RegisterFor_AfterTransferUsesNextNonce() public {
@@ -346,7 +455,7 @@ contract OTTPRegistryTest is Test {
         registry.transferId(1, bob);
         // alice is ID-free again; the old signature (nonce 0) is dead, nonce 1 works and yields a new ID.
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, _sig(alicePk, alice, 0, deadline));
         vm.prank(relayer);
         assertEq(registry.registerFor(alice, deadline, _sig(alicePk, alice, 1, deadline)), 2);
@@ -357,7 +466,7 @@ contract OTTPRegistryTest is Test {
         bytes memory sig = RegistrySigUtils.sign(vm, alicePk, address(registry), 8453, alice, 0, deadline);
         assertTrue(block.chainid != 8453, "test chain must differ");
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, sig);
     }
 
@@ -366,7 +475,7 @@ contract OTTPRegistryTest is Test {
         uint256 deadline = block.timestamp + 1 hours;
         bytes memory sig = RegistrySigUtils.sign(vm, alicePk, address(other), block.chainid, alice, 0, deadline);
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, sig);
         // …but is valid on the contract it was made for
         vm.prank(relayer);
@@ -379,7 +488,7 @@ contract OTTPRegistryTest is Test {
         bytes memory sig = _sig(alicePk, alice, 0, deadline);
         vm.chainId(84532);
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, sig);
         bytes memory sig2 = RegistrySigUtils.sign(vm, alicePk, address(registry), 84532, alice, 0, deadline);
         vm.prank(relayer);
@@ -389,13 +498,13 @@ contract OTTPRegistryTest is Test {
     function test_RegisterFor_MalformedSignatureReverts() public {
         uint256 deadline = block.timestamp + 1 hours;
         vm.startPrank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, "");
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, hex"deadbeef");
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, new bytes(64));
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, new bytes(65));
         vm.stopPrank();
     }
@@ -408,17 +517,17 @@ contract OTTPRegistryTest is Test {
         bytes32 sMal = bytes32(uint256(0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141) - uint256(s));
         uint8 vMal = v == 27 ? 28 : 27;
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, abi.encodePacked(r, sMal, vMal));
     }
 
     function test_RegisterFor_ZeroWalletReverts() public {
         uint256 deadline = block.timestamp + 1 hours;
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(address(0), deadline, new bytes(65));
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(address(0), deadline, "");
     }
 
@@ -453,7 +562,7 @@ contract OTTPRegistryTest is Test {
         uint256 deadline = block.timestamp + 1 hours;
         bytes memory sig = _sig(bobPk, address(wallet), 0, deadline);
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(address(wallet), deadline, sig);
     }
 
@@ -464,7 +573,7 @@ contract OTTPRegistryTest is Test {
         vm.prank(relayer);
         registry.registerFor(address(wallet), deadline, sig);
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(address(wallet), deadline, sig);
     }
 
@@ -475,7 +584,7 @@ contract OTTPRegistryTest is Test {
         vm.prank(relayer);
         assertEq(registry.registerFor(address(wallet), deadline, abi.encode(password)), 1);
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(address(wallet), deadline, abi.encode(keccak256("wrong")));
     }
 
@@ -483,7 +592,7 @@ contract OTTPRegistryTest is Test {
         NotAWallet c = new NotAWallet();
         uint256 deadline = block.timestamp + 1 hours;
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(address(c), deadline, _sig(alicePk, address(c), 0, deadline));
     }
 
@@ -535,7 +644,7 @@ contract OTTPRegistryTest is Test {
         address signer = vm.addr(pk);
         uint256 deadline = block.timestamp + 1 days;
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(signer, deadline, _sig(pk, signer, nonce, deadline));
     }
 
@@ -545,7 +654,7 @@ contract OTTPRegistryTest is Test {
         address signer = vm.addr(pk);
         bytes memory sig = _sig(pk, signer, 0, deadline);
         vm.prank(relayer);
-        vm.expectRevert("Signature expired");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__SignatureExpired.selector);
         registry.registerFor(signer, deadline, sig);
     }
 
@@ -556,7 +665,7 @@ contract OTTPRegistryTest is Test {
         address a = vm.addr(pkA);
         uint256 deadline = block.timestamp + 1 days;
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(a, deadline, _sig(pkB, a, 0, deadline));
     }
 
@@ -571,10 +680,10 @@ contract OTTPRegistryTest is Test {
         bytes memory sig = _sig(pk, signer, 0, deadline);
 
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(signer, deadline + tamper, sig); // tampered deadline
         vm.prank(relayer);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(other, deadline, sig); // tampered wallet
     }
 
@@ -583,7 +692,7 @@ contract OTTPRegistryTest is Test {
         registry.register(); // id 1 owned by alice
         vm.assume(caller != alice);
         vm.prank(caller);
-        vm.expectRevert("Not the owner of this ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
         registry.transferId(id, to);
         assertEq(registry.getWallet(1), alice);
     }
@@ -605,7 +714,7 @@ contract OTTPRegistryTest is Test {
         registry.register();
         vm.assume(id != 1);
         vm.prank(alice);
-        vm.expectRevert("Not the owner of this ID");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
         registry.transferId(id, to);
     }
 

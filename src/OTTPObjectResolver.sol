@@ -6,6 +6,12 @@ import { Attestation } from "@ethereum-attestation-service/eas-contracts/contrac
 import { SchemaResolver } from "@ethereum-attestation-service/eas-contracts/contracts/resolver/SchemaResolver.sol";
 
 import { IOTTPRegistry } from "./IOTTPRegistry.sol";
+import {
+    OTTPResolver__ZeroId,
+    OTTPResolver__IdNotRegistered,
+    OTTPResolver__AttesterNotOwner,
+    OTTPResolver__ZeroRegistry
+} from "./OTTPResolverErrors.sol";
 
 /// @title OTTPObjectResolver
 /// @notice EAS resolver for the OTTP Object schema. Validates that the attester owns the claimed `creatorId`.
@@ -19,7 +25,7 @@ contract OTTPObjectResolver is SchemaResolver {
     /// @param eas The EAS contract (Base predeploy 0x4200000000000000000000000000000000000021).
     /// @param _registry The OTTPRegistry.
     constructor(IEAS eas, IOTTPRegistry _registry) SchemaResolver(eas) {
-        require(address(_registry) != address(0), "Zero registry");
+        if (address(_registry) == address(0)) revert OTTPResolver__ZeroRegistry();
         registry = _registry;
     }
 
@@ -34,11 +40,14 @@ contract OTTPObjectResolver is SchemaResolver {
         returns (bool)
     {
         (, uint256 creatorId,) = abi.decode(attestation.data, (bytes32, uint256, string));
-        require(creatorId != 0, "OTTP: creator id is zero");
+        if (creatorId == 0) revert OTTPResolver__ZeroId();
         // Unissued IDs map to address(0). The explicit non-zero check makes the guarantee independent of EAS
-        // internals (EAS never yields a zero attester today, but this resolver is immutable).
+        // internals (spec v1.2 D1: an immutable resolver must not rely on EAS never producing a zero attester).
         address owner = registry.getWallet(creatorId);
-        require(owner != address(0) && attestation.attester == owner, "OTTP: attester does not own this id");
+        if (owner == address(0)) revert OTTPResolver__IdNotRegistered(creatorId);
+        if (attestation.attester != owner) {
+            revert OTTPResolver__AttesterNotOwner(creatorId, attestation.attester, owner);
+        }
         return true;
     }
 

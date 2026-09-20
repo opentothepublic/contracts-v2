@@ -1,7 +1,7 @@
 # OTTP v2.1 — contracts
 
 The base-level primitive of the Open Attribution Protocol on Base. Three immutable contracts and two
-non-revocable EAS schemas. Implements `ottp-smart-contracts-spec.md` v1.1 (ratified July 2026).
+non-revocable EAS schemas. Implements `ottp-smart-contracts-spec.md` v1.2 (ratified July 2026, D1–D6 edits September 2026).
 
 | Contract | Role |
 |---|---|
@@ -15,21 +15,39 @@ non-revocable EAS schemas. Implements `ottp-smart-contracts-spec.md` v1.1 (ratif
 - **Non-revocable.** Both schemas are registered with `revocable = false`. History is append-only; corrections are newer attestations. `onRevoke` denies as defense-in-depth on a path EAS never reaches.
 - **Authenticity only.** Resolvers check identity ↔ wallet and nothing else. They never read `name`, `metadata`, `originUid`, `refUID`, or `recipient`. Authority, ownership, and status are derived offchain per `ottp-indexer-rules.md`.
 - **One ID per wallet.** `transferId` requires an ID-free target. An old wallet may later register a fresh ID; it never gets the old one back.
+- **Every registration consumes the wallet's EIP-712 nonce** (either path), so a `registerFor` signature made before any registration is dead afterwards.
 - **Delegated writes validate the signer.** EAS stores the signer as `attestation.attester` for `attestByDelegation`, so relayed and direct attestations are checked identically.
 - **No funds.** Neither the registry nor the resolvers accept ETH.
 - **Generational migration.** All state is readable through public getters (`getWallet`, `getId`, `totalRegistered`, `nextId`, `idToWallet`, `walletToId`, `nonces`) so a future generation can prove v2.1 records.
 
+## Errors (custom errors, spec v1.2 D4)
+
+| Error | Raised by | Meaning |
+|---|---|---|
+| `OTTPRegistry__ZeroAddress()` | `registerFor`/`_register`, `transferId` | Wallet or transfer target is `address(0)`. |
+| `OTTPRegistry__WalletAlreadyRegistered(address wallet, uint256 existingId)` | `register`, `registerFor` | One ID per wallet. |
+| `OTTPRegistry__NotOwner(uint256 id, address caller)` | `transferId` | Caller is not the ID's current wallet, or the ID is unissued. |
+| `OTTPRegistry__TargetAlreadyRegistered(address target, uint256 existingId)` | `transferId` | Target already holds an ID (no consolidation). |
+| `OTTPRegistry__SignatureExpired(uint256 deadline, uint256 blockTimestamp)` | `registerFor` | `block.timestamp > deadline`. |
+| `OTTPRegistry__InvalidSignature(address wallet)` | `registerFor` | ECDSA / ERC-1271 check failed for `wallet` at its current nonce. |
+| `OTTPResolver__ZeroId()` | both resolvers | Claimed `ottpId` / `creatorId` is 0. |
+| `OTTPResolver__IdNotRegistered(uint256 id)` | both resolvers | Claimed ID has no current wallet (unissued). |
+| `OTTPResolver__AttesterNotOwner(uint256 id, address attester, address owner)` | both resolvers | Attester is not the ID's current wallet. |
+| `OTTPResolver__ZeroRegistry()` | resolver constructors | Registry address is zero. |
+
+Resolver errors live in `src/OTTPResolverErrors.sol` so SDKs decode one set. When a resolver reverts, EAS bubbles the revert data unchanged, so these selectors are what a client sees from `attest` / `attestByDelegation`. `abi.decode` failures on malformed data revert without a selector.
+
 ## EIP-712 (`registerFor`)
 
 - Domain: `name = "OTTPRegistry"`, `version = "2"`, `chainId = block.chainid`, `verifyingContract = <registry>` (ERC-5267 `eip712Domain()`).
-- Type: `Register(address wallet,uint256 nonce,uint256 deadline)`; `nonce = registry.nonces(wallet)`.
+- Type: `Register(address wallet,uint256 nonce,uint256 deadline)`; `nonce = registry.nonces(wallet)`, read immediately before signing. The nonce moves on every registration of that wallet (either path), never on failure or on `transferId`.
 - Any relayer may submit; the only possible outcome is `wallet` receiving the next ID.
 
 ## Integration notes (from the independent audit, 2026-09-20)
 
 - **Delegated attestations on Base mainnet are ECDSA-only.** Base mainnet runs EAS 1.0.1, whose `attestByDelegation` uses `ECDSA.recover`; a Safe / ERC-1271 wallet can `registerFor` but must call `EAS.attest` directly (it cannot be relayed). Base Sepolia runs EAS 1.2.0 with different typed data. Build delegated typed data per chain (see `test/fork/EASFork.t.sol`).
 - **Never use EAS's `EIP712Proxy` for OTTP writes**, and never `transferId` an ID to a permissionless forwarder contract. A proxy is recorded as the attester, so an ID held by a shared proxy could be used by anyone who can drive it.
-- **`registerFor` signatures should carry short deadlines** (an hour or less). Only `registerFor` consumes a nonce; a long-lived signature left over after the wallet registered directly and later transferred its ID could be replayed to give the old wallet an unwanted fresh ID (gas griefing only; recoverable).
+- **Stale `registerFor` signatures are dead by construction** (spec v1.2 D6): every registration consumes the nonce, so a signature made before the wallet registered by any path cannot be replayed later. Short deadlines remain good hygiene, not a security dependency.
 - **Signature format:** 65-byte `r || s || v` with `v ∈ {27, 28}`, low-s. ERC-2098 compact signatures and `v ∈ {0, 1}` are rejected. Counterfactual (undeployed) smart accounts cannot use `registerFor` (no ERC-6492); EIP-7702 delegated EOAs can only if their delegate implements ERC-1271.
 - **Indexers must read the ID from the ABI head word** (word 0 for Subject, word 1 for Object). Solidity's `abi.decode` accepts some non-canonical string encodings that strict decoders reject; never drop a chain-accepted attestation because the strings failed to decode — treat them as raw bytes.
 - **ID #1 is first-come-first-served** the moment the registry exists. If specific low IDs matter, register them inside the deploy broadcast.
@@ -86,3 +104,30 @@ src/        OTTPRegistry.sol, OTTPSubjectResolver.sol, OTTPObjectResolver.sol, I
 script/     Deploy.s.sol
 test/       OTTPRegistry.t.sol, Resolvers.t.sol, invariant/, fork/, mocks/, utils/
 ```
+
+## Human read checklist (for Nate, before the mainnet transaction)
+
+`src/` is about 180 lines. Read every line; these are the things to verify by eye.
+
+**`OTTPRegistry.sol`**
+- Constructor: `EIP712("OTTPRegistry", "2")`, nothing else. No owner, no initializer, no constructor arguments.
+- `nextId` starts at 1; `totalRegistered()` is `nextId - 1`. ID 0 is never issued.
+- `register()`: just `_register(msg.sender)`.
+- `registerFor`: deadline check is `block.timestamp > deadline` → revert (so `== deadline` is valid); the digest uses `nonces[wallet]` read **before** `_register`; verification is `SignatureChecker.isValidSignatureNow` (not bare `ECDSA`), against `wallet`, not `msg.sender`; the only state change happens inside `_register(wallet)`.
+- `_register`: rejects `address(0)`; rejects a wallet that already has an ID; writes `idToWallet` and `walletToId`; increments `nonces[wallet]` exactly once; emits `Registered`. Nothing about `msg.sender`.
+- `transferId`: `owner = idToWallet[id]`; reverts unless `owner != 0 && owner == msg.sender`; reverts on zero target; reverts if target already has an ID; clears `walletToId[msg.sender]`, sets both mappings, emits `Transferred`. Does **not** touch nonces or `nextId`.
+- `REGISTER_TYPEHASH` string is exactly `Register(address wallet,uint256 nonce,uint256 deadline)`.
+- No `receive`/`fallback`, no `selfdestruct`, no `delegatecall`, no external calls other than the ERC-1271 staticcall inside OZ.
+
+**`OTTPSubjectResolver.sol` / `OTTPObjectResolver.sol`**
+- Inherit EAS `SchemaResolver` only; constructor takes `(IEAS, IOTTPRegistry)`, rejects a zero registry, stores it as `immutable`.
+- `onAttest` decodes `(uint256, string, string)` for Subject and `(bytes32, uint256, string)` for Object — the ID is word 0 for Subject and word 1 for Object, matching the schema strings in `Schemas.sol`.
+- Order of checks: `id == 0` → `ZeroId`; `owner = registry.getWallet(id)`; `owner == 0` → `IdNotRegistered`; `attester != owner` → `AttesterNotOwner`; return `true`. `value` is ignored. Nothing reads `name`, `metadata`, `originUid`, `refUID`, or `recipient`.
+- `onRevoke` is `pure` and returns `false`. `isPayable` is inherited and returns `false`.
+- Both are `view`-only apart from the constructor; no storage writes anywhere.
+
+**`Schemas.sol`**
+- Strings are byte-for-byte `uint256 ottpId, string name, string metadata` and `bytes32 originUid, uint256 creatorId, string metadata`; `REVOCABLE = false`; EAS `0x4200…0021`, SchemaRegistry `0x4200…0020`; chain IDs 8453 / 84532.
+
+**`script/Deploy.s.sol`**
+- Order: Registry → SubjectResolver → ObjectResolver → Subject schema → Object schema. Both schemas registered with `OTTPSchemas.REVOCABLE` (false). Post-conditions assert resolver→registry wiring, schema records, and UID derivation. Chain guard: only 8453 (with `ALLOW_MAINNET=true`) or 84532.

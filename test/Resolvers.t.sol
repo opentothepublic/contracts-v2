@@ -14,6 +14,12 @@ import { ISchemaResolver } from "@ethereum-attestation-service/eas-contracts/con
 import { SchemaResolver } from "@ethereum-attestation-service/eas-contracts/contracts/resolver/SchemaResolver.sol";
 
 import { OTTPRegistry } from "../src/OTTPRegistry.sol";
+import {
+    OTTPResolver__ZeroId,
+    OTTPResolver__IdNotRegistered,
+    OTTPResolver__AttesterNotOwner,
+    OTTPResolver__ZeroRegistry
+} from "../src/OTTPResolverErrors.sol";
 import { IOTTPRegistry } from "../src/IOTTPRegistry.sol";
 import { OTTPSubjectResolver } from "../src/OTTPSubjectResolver.sol";
 import { OTTPObjectResolver } from "../src/OTTPObjectResolver.sol";
@@ -52,7 +58,7 @@ contract ResolversTest is Test {
     // ─── helpers ───────────────────────────────────────────────────────────────────────────────────────────
 
     function _subjectData(uint256 ottpId) internal pure returns (bytes memory) {
-        return abi.encode(ottpId, "name", '{"identityType":"person"}');
+        return abi.encode(ottpId, "name", '{"identityType":"user"}');
     }
 
     function _objectData(bytes32 originUid, uint256 creatorId) internal pure returns (bytes memory) {
@@ -94,9 +100,9 @@ contract ResolversTest is Test {
     }
 
     function test_Constructor_ZeroRegistryReverts() public {
-        vm.expectRevert("Zero registry");
+        vm.expectRevert(OTTPResolver__ZeroRegistry.selector);
         new OTTPSubjectResolver(IEAS(address(eas)), IOTTPRegistry(address(0)));
-        vm.expectRevert("Zero registry");
+        vm.expectRevert(OTTPResolver__ZeroRegistry.selector);
         new OTTPObjectResolver(IEAS(address(eas)), IOTTPRegistry(address(0)));
     }
 
@@ -125,33 +131,33 @@ contract ResolversTest is Test {
 
     function test_Subject_NonOwnerRejected() public {
         vm.prank(bob);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attest(subjectSchema, _req(_subjectData(1), EMPTY_UID));
     }
 
     function test_Subject_UnregisteredWalletRejected() public {
         vm.prank(mallory);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attest(subjectSchema, _req(_subjectData(1), EMPTY_UID));
     }
 
     function test_Subject_IdZeroRejected() public {
         vm.prank(alice);
-        vm.expectRevert("OTTP: id is zero");
+        vm.expectRevert(OTTPResolver__ZeroId.selector);
         eas.attest(subjectSchema, _req(_subjectData(0), EMPTY_UID));
         // …even from an unregistered wallet, and the zero check fires first
         vm.prank(mallory);
-        vm.expectRevert("OTTP: id is zero");
+        vm.expectRevert(OTTPResolver__ZeroId.selector);
         eas.attest(subjectSchema, _req(_subjectData(0), EMPTY_UID));
     }
 
     function test_Subject_UnissuedIdRejected() public {
         uint256 next = registry.totalRegistered() + 1;
         vm.prank(alice);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__IdNotRegistered.selector);
         eas.attest(subjectSchema, _req(_subjectData(next), EMPTY_UID));
         vm.prank(alice);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__IdNotRegistered.selector);
         eas.attest(subjectSchema, _req(_subjectData(type(uint256).max), EMPTY_UID));
     }
 
@@ -210,25 +216,25 @@ contract ResolversTest is Test {
 
     function test_Object_NonOwnerRejected() public {
         vm.prank(bob);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attest(objectSchema, _req(_objectData(EMPTY_UID, 1), EMPTY_UID));
     }
 
     function test_Object_UnregisteredWalletRejected() public {
         vm.prank(mallory);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attest(objectSchema, _req(_objectData(EMPTY_UID, 2), EMPTY_UID));
     }
 
     function test_Object_CreatorIdZeroRejected() public {
         vm.prank(alice);
-        vm.expectRevert("OTTP: creator id is zero");
+        vm.expectRevert(OTTPResolver__ZeroId.selector);
         eas.attest(objectSchema, _req(_objectData(EMPTY_UID, 0), EMPTY_UID));
     }
 
     function test_Object_UnissuedIdRejected() public {
         vm.prank(alice);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__IdNotRegistered.selector);
         eas.attest(objectSchema, _req(_objectData(EMPTY_UID, 3), EMPTY_UID));
     }
 
@@ -267,7 +273,7 @@ contract ResolversTest is Test {
         assertEq(eas.getAttestation(bobObj).refUID, aliceObj);
         // …but bob cannot claim alice's creatorId while doing so
         vm.prank(bob);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attest(objectSchema, _req(_objectData(EMPTY_UID, 1), aliceObj));
     }
 
@@ -280,10 +286,10 @@ contract ResolversTest is Test {
         registry.transferId(1, alice2);
 
         vm.prank(alice);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attest(subjectSchema, _req(_subjectData(1), EMPTY_UID));
         vm.prank(alice);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attest(objectSchema, _req(_objectData(EMPTY_UID, 1), EMPTY_UID));
 
         _attestSubject(alice2, 1);
@@ -299,7 +305,7 @@ contract ResolversTest is Test {
         assertEq(newId, 3);
         _attestSubject(alice, 3);
         vm.prank(alice);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attest(subjectSchema, _req(_subjectData(1), EMPTY_UID));
     }
 
@@ -316,13 +322,13 @@ contract ResolversTest is Test {
     function test_Delegated_RelayerOwnsIdButSignerDoesNot_Rejected() public {
         // msg.sender (relayer) owning the ID must not help: the resolver checks attester (signer) only.
         vm.prank(bob); // bob owns id 2, relays for mallory
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attestByDelegation(subjectSchema, _req(_subjectData(2), EMPTY_UID), mallory);
     }
 
     function test_Delegated_UnregisteredSignerRejected() public {
         vm.prank(relayer);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attestByDelegation(objectSchema, _req(_objectData(EMPTY_UID, 1), EMPTY_UID), mallory);
     }
 
@@ -426,7 +432,7 @@ contract ResolversTest is Test {
         arr[1].data = _subjectData(1); // bob claims alice's id
         uint256[] memory vals = new uint256[](2);
         vm.prank(address(eas));
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         subjectResolver.multiAttest(arr, vals);
         arr[1].data = _subjectData(2);
         vm.prank(address(eas));
@@ -438,7 +444,7 @@ contract ResolversTest is Test {
     /// @dev {owns, doesn't own, id 0, unissued} × {direct, delegated} × {Subject, Object}
     function test_Matrix() public {
         uint256[4] memory ids = [uint256(1), 2, 0, 99];
-        bytes memory expectedErr;
+        bytes4 expectedErr;
         for (uint256 s = 0; s < 2; s++) {
             bool isSubject = s == 0;
             for (uint256 i = 0; i < 4; i++) {
@@ -446,16 +452,17 @@ contract ResolversTest is Test {
                     bool delegated = d == 1;
                     uint256 id = ids[i];
                     bool shouldPass = i == 0; // alice attests; only id 1 is hers
-                    if (i == 1 || i == 3) expectedErr = "OTTP: attester does not own this id";
+                    if (i == 1) expectedErr = OTTPResolver__AttesterNotOwner.selector;
+                    if (i == 3) expectedErr = OTTPResolver__IdNotRegistered.selector;
                     if (i == 2) {
-                        expectedErr = isSubject ? bytes("OTTP: id is zero") : bytes("OTTP: creator id is zero");
+                        expectedErr = OTTPResolver__ZeroId.selector;
                     }
 
                     bytes memory data = isSubject ? _subjectData(id) : _objectData(EMPTY_UID, id);
                     bytes32 schema = isSubject ? subjectSchema : objectSchema;
                     AttestationRequestData memory r = _req(data, EMPTY_UID);
 
-                    if (!shouldPass) vm.expectRevert(expectedErr);
+                    if (!shouldPass) vm.expectPartialRevert(expectedErr);
                     if (delegated) {
                         vm.prank(relayer);
                         eas.attestByDelegation(schema, r, alice);

@@ -59,35 +59,31 @@ contract AuditRegistryTest is Test {
         return RegistrySigUtils.sign(vm, pk, address(registry), block.chainid, wallet, nonce, deadline);
     }
 
-    // ── A1: register() does not consume the EIP-712 nonce → a stale Register signature outlives a direct
-    //       registration and a transfer, and lets a third party re-register the old wallet (LOW, griefing). ──
-    function test_A1_StaleRegisterSignature_UsableAfterDirectRegisterAndTransfer() public {
-        // Alice signs a sponsored-registration message (long deadline, as a relayer UI might request) ...
+    // ── A1 (LOW-2, FIXED by spec v1.2 D6): a registerFor signature issued before ANY registration is dead after it,
+    //       because _register consumes the nonce on both paths. The stale-signature griefing path is closed. ──
+    function test_A1_StaleRegisterSignature_DeadAfterDirectRegisterAndTransfer() public {
         uint256 deadline = type(uint256).max;
         bytes memory stale = _sig(alicePk, alice, 0, deadline);
 
-        // ... but the relayer is slow, so she registers herself directly. Nonce stays 0.
         vm.prank(alice);
         uint256 id = registry.register();
         assertEq(id, 1);
-        assertEq(registry.nonces(alice), 0, "register() leaves the signature nonce untouched");
+        assertEq(registry.nonces(alice), 1, "register() consumes the signature nonce (D6)");
 
-        // Later she rotates keys: id 1 moves to alice2. Wallet `alice` is now ID-free again.
         vm.prank(alice);
         registry.transferId(1, alice2);
         assertEq(registry.getId(alice), 0);
 
-        // Anyone holding the stale signature can now register `alice` a second time, against her will.
+        // The stale signature is worthless now.
         vm.prank(mallory);
-        uint256 unwanted = registry.registerFor(alice, deadline, stale);
-        assertEq(unwanted, 2);
-        assertEq(registry.getId(alice), 2, "old wallet re-registered without owner action");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
+        registry.registerFor(alice, deadline, stale);
+        assertEq(registry.getId(alice), 0, "old wallet stays ID-free");
 
-        // Concrete harm: alice2 can no longer move id 1 back to `alice` (target must be ID-free).
+        // alice2 can still move id 1 back to `alice`.
         vm.prank(alice2);
-        vm.expectRevert("Target wallet already has an OTTP ID");
         registry.transferId(1, alice);
-        // Recoverable only by alice spending gas to park id 2 somewhere else first.
+        assertEq(registry.getId(alice), 1);
     }
 
     // ── A2: over-permissive ERC-1271 implementation ⇒ anyone can force-register that contract (LOW/INFO). ──
@@ -100,15 +96,19 @@ contract AuditRegistryTest is Test {
         assertEq(registry.getWallet(id), address(w));
     }
 
-    // ── A3: nonce is consumed BEFORE the ERC-1271 call, so a 1271 wallet that reads registry.nonces() during
-    //       validation observes nonce+1 (INFO: ordering is atomic and safe, but observable). ──
-    function test_A3_NonceIncrementVisibleToErc1271Wallet() public {
+    // ── A3 (updated for v1.2): the nonce is consumed in _register, AFTER signature validation, so a 1271 wallet
+    //       that reads registry.nonces() during validation observes the nonce the digest was built with. ──
+    function test_A3_NonceVisibleToErc1271WalletIsPreIncrement() public {
         NonceReadingWallet w = new NonceReadingWallet(registry);
-        // The wallet accepts only when it observes nonce == 0; the registry has already bumped it to 1.
+        // The wallet accepts only when it observes nonce == 0, which is now the case during validation.
         vm.prank(mallory);
-        vm.expectRevert("Invalid signature");
+        uint256 id = registry.registerFor(address(w), block.timestamp + 1, "");
+        assertEq(id, 1);
+        assertEq(registry.nonces(address(w)), 1, "nonce consumed after validation");
+        // second attempt: the wallet now sees nonce 1 and rejects
+        vm.prank(mallory);
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(address(w), block.timestamp + 1, "");
-        assertEq(registry.nonces(address(w)), 0, "nonce rolled back with the revert");
     }
 
     // ── A4: hostile `wallet` values in registerFor are all rejected (registry, resolver, mock EAS, precompiles, 0). ──
@@ -123,16 +123,16 @@ contract AuditRegistryTest is Test {
         targets[4] = address(this);
         for (uint256 i = 0; i < targets.length; ++i) {
             vm.prank(mallory);
-            vm.expectRevert("Invalid signature");
+            vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
             registry.registerFor(targets[i], deadline, junk);
         }
         // precompiles 0x01..0x0a: no code → ECDSA path → must recover to the precompile address (infeasible)
         for (uint160 p = 1; p <= 10; ++p) {
             vm.prank(mallory);
-            vm.expectRevert("Invalid signature");
+            vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
             registry.registerFor(address(p), deadline, junk);
             vm.prank(mallory);
-            vm.expectRevert("Invalid signature");
+            vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
             registry.registerFor(address(p), deadline, "");
         }
     }
@@ -146,7 +146,7 @@ contract AuditRegistryTest is Test {
         // simulate a 7702 delegation designator appearing on alice between signing and relaying
         vm.etch(alice, abi.encodePacked(hex"ef0100", makeAddr("someDelegate")));
         vm.prank(mallory);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, sig);
         // she can still register directly
         vm.etch(alice, "");
@@ -160,7 +160,7 @@ contract AuditRegistryTest is Test {
         uint256 deadline = block.timestamp + 1 hours;
         bytes memory sig = _sig(alicePk, alice, 0, deadline); // bound to `registry`
         vm.prank(mallory);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         other.registerFor(alice, deadline, sig);
         vm.prank(mallory);
         assertEq(registry.registerFor(alice, deadline, sig), 1);
@@ -173,7 +173,7 @@ contract AuditRegistryTest is Test {
             vm.sign(alicePk, RegistrySigUtils.digest(address(registry), block.chainid, alice, 0, deadline));
         bytes32 vs = bytes32((uint256(v - 27) << 255) | uint256(s));
         vm.prank(mallory);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, abi.encodePacked(r, vs));
     }
 
@@ -183,7 +183,7 @@ contract AuditRegistryTest is Test {
         (uint8 v, bytes32 r, bytes32 s) =
             vm.sign(alicePk, RegistrySigUtils.digest(address(registry), block.chainid, alice, 0, deadline));
         vm.prank(mallory);
-        vm.expectRevert("Invalid signature");
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, abi.encodePacked(r, s, uint8(v - 27)));
     }
 

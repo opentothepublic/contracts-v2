@@ -23,10 +23,18 @@ import {
 import { ISchemaResolver } from "@ethereum-attestation-service/eas-contracts/contracts/resolver/ISchemaResolver.sol";
 
 import { OTTPRegistry } from "../../src/OTTPRegistry.sol";
+import {
+    OTTPResolver__ZeroId,
+    OTTPResolver__IdNotRegistered,
+    OTTPResolver__AttesterNotOwner,
+    OTTPResolver__ZeroRegistry
+} from "../../src/OTTPResolverErrors.sol";
 import { OTTPSubjectResolver } from "../../src/OTTPSubjectResolver.sol";
 import { OTTPObjectResolver } from "../../src/OTTPObjectResolver.sol";
 import { OTTPSchemas } from "../../src/Schemas.sol";
 import { RegistrySigUtils } from "../utils/RegistrySigUtils.sol";
+import { ERC1271Wallet } from "../mocks/ERC1271Wallet.sol";
+import { Deploy } from "../../script/Deploy.s.sol";
 
 /// @dev EAS 1.0.1 (Base mainnet) delegated request: no `deadline` field.
 struct DelegatedAttestationRequestV101 {
@@ -73,14 +81,16 @@ abstract contract EASForkBase is Test {
     function _defaultRpc() internal pure virtual returns (string memory);
     function _expectedChainId() internal pure virtual returns (uint256);
     function _expectedEasVersion() internal pure virtual returns (string memory);
-    /// @dev If `expectedRevert` is non-empty, `vm.expectRevert(expectedRevert)` is armed immediately before the
+    /// @dev EAS 1.0.1 verifies delegated signatures with ECDSA.recover (EOA only); 1.2.0+ uses SignatureChecker.
+    function _easRelaysErc1271() internal pure virtual returns (bool);
+    /// @dev If `expectedRevert` is non-zero, `vm.expectRevert(expectedRevert)` is armed immediately before the
     ///      real `attestByDelegation` call (after the view calls used to build the signature).
     function _attestByDelegation(
         bytes32 schema,
         AttestationRequestData memory data,
         uint256 signerPk,
         address signer,
-        bytes memory expectedRevert
+        bytes4 expectedRevert
     ) internal virtual returns (bytes32);
 
     function setUp() public {
@@ -133,7 +143,7 @@ abstract contract EASForkBase is Test {
     }
 
     function _subject(uint256 id) internal pure returns (bytes memory) {
-        return abi.encode(id, "alice", '{"identityType":"person"}');
+        return abi.encode(id, "alice", '{"identityType":"user"}');
     }
 
     function _object(bytes32 originUid, uint256 creatorId) internal pure returns (bytes memory) {
@@ -167,7 +177,7 @@ abstract contract EASForkBase is Test {
 
         // bob claims alice's id → reverts inside the real EAS via the resolver
         vm.prank(bob);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attest(AttestationRequest({ schema: subjectSchema, data: _data(_subject(1), EMPTY_UID) }));
 
         // bob attests his own → fine
@@ -176,10 +186,10 @@ abstract contract EASForkBase is Test {
 
         // id 0 and unissued id
         vm.prank(alice);
-        vm.expectRevert("OTTP: id is zero");
+        vm.expectRevert(OTTPResolver__ZeroId.selector);
         eas.attest(AttestationRequest({ schema: subjectSchema, data: _data(_subject(0), EMPTY_UID) }));
         vm.prank(alice);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__IdNotRegistered.selector);
         eas.attest(AttestationRequest({ schema: subjectSchema, data: _data(_subject(3), EMPTY_UID) }));
     }
 
@@ -197,7 +207,7 @@ abstract contract EASForkBase is Test {
         vm.prank(bob);
         eas.attest(AttestationRequest({ schema: objectSchema, data: _data(_object(EMPTY_UID, 2), obj) }));
         vm.prank(bob);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attest(AttestationRequest({ schema: objectSchema, data: _data(_object(EMPTY_UID, 1), obj) }));
 
         // dangling refUID rejected by EAS core
@@ -224,7 +234,7 @@ abstract contract EASForkBase is Test {
 
     function test_DelegatedAttest_SignerIsAttester() public {
         // relayer submits, alice signed → resolver sees alice as attester and accepts
-        bytes32 uid = _attestByDelegation(subjectSchema, _data(_subject(1), EMPTY_UID), alicePk, alice, "");
+        bytes32 uid = _attestByDelegation(subjectSchema, _data(_subject(1), EMPTY_UID), alicePk, alice, bytes4(0));
         Attestation memory a = eas.getAttestation(uid);
         assertEq(a.attester, alice, "attester must be the signer, not the relayer");
         assertTrue(a.attester != relayer);
@@ -232,26 +242,26 @@ abstract contract EASForkBase is Test {
         console2.logBytes32(uid);
 
         // delegated Object with refUID to the delegated Subject
-        bytes32 obj = _attestByDelegation(objectSchema, _data(_object(EMPTY_UID, 1), uid), alicePk, alice, "");
+        bytes32 obj = _attestByDelegation(objectSchema, _data(_object(EMPTY_UID, 1), uid), alicePk, alice, bytes4(0));
         assertEq(eas.getAttestation(obj).refUID, uid);
     }
 
     function test_DelegatedAttest_UnregisteredSignerRejected() public {
         _attestByDelegation(
-            subjectSchema, _data(_subject(1), EMPTY_UID), malloryPk, mallory, "OTTP: attester does not own this id"
+            subjectSchema, _data(_subject(1), EMPTY_UID), malloryPk, mallory, OTTPResolver__AttesterNotOwner.selector
         );
     }
 
     function test_DelegatedAttest_SignerClaimingOthersIdRejected() public {
         _attestByDelegation(
-            objectSchema, _data(_object(EMPTY_UID, 1), EMPTY_UID), bobPk, bob, "OTTP: attester does not own this id"
+            objectSchema, _data(_object(EMPTY_UID, 1), EMPTY_UID), bobPk, bob, OTTPResolver__AttesterNotOwner.selector
         );
     }
 
     function test_DelegatedAttest_ForgedSignatureRejectedByEAS() public {
         // bob signs a request that names alice as attester → EAS's own signature check rejects before our resolver
         _attestByDelegation(
-            subjectSchema, _data(_subject(1), EMPTY_UID), bobPk, alice, abi.encodeWithSignature("InvalidSignature()")
+            subjectSchema, _data(_subject(1), EMPTY_UID), bobPk, alice, bytes4(keccak256("InvalidSignature()"))
         );
     }
 
@@ -272,12 +282,84 @@ abstract contract EASForkBase is Test {
         assertEq(eas.getAttestation(uid).attester, newcomer);
     }
 
+    /// @dev Safe-style smart-contract wallet: minimal ERC-1271 wallet whose isValidSignature accepts an ECDSA
+    ///      signature from its single owner over the raw hash (Safe's 1-of-1 semantics for EIP-712 hashes without
+    ///      the Safe message wrapper). Deploying a real Safe on the fork would need the Safe factory + singleton
+    ///      bytecode and Safe's message-hash wrapping in the signer; the resolver/EAS behaviour under test does not
+    ///      depend on either.
+    function test_SafeStyleWallet_RegisterForThenDirectAttest() public {
+        (address owner, uint256 ownerPk) = makeAddrAndKey("safe-owner");
+        ERC1271Wallet safe = new ERC1271Wallet(owner);
+        vm.deal(address(safe), 1 ether);
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig =
+            RegistrySigUtils.sign(vm, ownerPk, address(registry), block.chainid, address(safe), 0, deadline);
+        vm.prank(relayer);
+        uint256 id = registry.registerFor(address(safe), deadline, sig);
+        assertEq(id, 3);
+        assertEq(registry.getWallet(3), address(safe));
+
+        // Direct attestation FROM the contract wallet: accepted on every EAS version.
+        vm.prank(address(safe));
+        bytes32 uid = eas.attest(
+            AttestationRequest({ schema: subjectSchema, data: _data(abi.encode(id, "safe", "{}"), EMPTY_UID) })
+        );
+        assertEq(eas.getAttestation(uid).attester, address(safe));
+        vm.prank(address(safe));
+        eas.attest(AttestationRequest({ schema: objectSchema, data: _data(_object(EMPTY_UID, id), uid) }));
+    }
+
+    /// @dev Relayed (attestByDelegation) attestation where the attester is a contract wallet and the signature is
+    ///      the owner's ECDSA signature. EAS 1.0.1 (Base mainnet) recovers the owner, not the wallet → rejects.
+    ///      EAS 1.2.0 (Base Sepolia) uses SignatureChecker → accepts via ERC-1271. Locks the divergence in.
+    function test_SafeStyleWallet_RelayedAttest_DependsOnEasVersion() public {
+        (address owner, uint256 ownerPk) = makeAddrAndKey("safe-owner");
+        ERC1271Wallet safe = new ERC1271Wallet(owner);
+        uint256 deadline = block.timestamp + 1 hours;
+        vm.prank(relayer);
+        uint256 id = registry.registerFor(
+            address(safe),
+            deadline,
+            RegistrySigUtils.sign(vm, ownerPk, address(registry), block.chainid, address(safe), 0, deadline)
+        );
+        AttestationRequestData memory d = _data(abi.encode(id, "safe", "{}"), EMPTY_UID);
+        if (_easRelaysErc1271()) {
+            bytes32 uid = _attestByDelegation(subjectSchema, d, ownerPk, address(safe), bytes4(0));
+            assertEq(eas.getAttestation(uid).attester, address(safe));
+        } else {
+            _attestByDelegation(subjectSchema, d, ownerPk, address(safe), bytes4(keccak256("InvalidSignature()")));
+        }
+    }
+
+    /// @dev D5: the deploy script must register exactly keccak256(schemaString ‖ resolver ‖ false) for both
+    ///      schemas, with the spec's byte-for-byte strings, against the REAL SchemaRegistry.
+    function test_DeployScript_RegistersExactSchemaUids() public {
+        vm.setEnv("ALLOW_MAINNET", "true"); // fork only; nothing is broadcast
+        Deploy d = new Deploy();
+        d.run();
+        (address reg, address subj, address obj, bytes32 subjUid, bytes32 objUid) = d.last();
+        assertEq(subjUid, keccak256(abi.encodePacked("uint256 ottpId, string name, string metadata", subj, false)));
+        assertEq(
+            objUid, keccak256(abi.encodePacked("bytes32 originUid, uint256 creatorId, string metadata", obj, false))
+        );
+        SchemaRecord memory sr = schemaRegistry.getSchema(subjUid);
+        SchemaRecord memory orr = schemaRegistry.getSchema(objUid);
+        assertEq(sr.schema, "uint256 ottpId, string name, string metadata");
+        assertEq(orr.schema, "bytes32 originUid, uint256 creatorId, string metadata");
+        assertEq(address(sr.resolver), subj);
+        assertEq(address(orr.resolver), obj);
+        assertFalse(sr.revocable);
+        assertFalse(orr.revocable);
+        assertEq(address(OTTPSubjectResolver(payable(subj)).registry()), reg);
+        assertEq(address(OTTPObjectResolver(payable(obj)).registry()), reg);
+    }
+
     function test_AfterTransfer_RealEAS() public {
         (address alice2,) = makeAddrAndKey("alice2");
         vm.prank(alice);
         registry.transferId(1, alice2);
         vm.prank(alice);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attest(AttestationRequest({ schema: subjectSchema, data: _data(_subject(1), EMPTY_UID) }));
         vm.prank(alice2);
         eas.attest(AttestationRequest({ schema: subjectSchema, data: _data(_subject(1), EMPTY_UID) }));
@@ -327,6 +409,10 @@ contract BaseMainnetForkTest is EASForkBase {
         return "1.0.1";
     }
 
+    function _easRelaysErc1271() internal pure override returns (bool) {
+        return false;
+    }
+
     /// @dev EAS 1.0.1 typed data:
     ///      Attest(bytes32 schema,address recipient,uint64 expirationTime,bool revocable,bytes32 refUID,bytes data,uint256 nonce)
     function _digestV101(bytes32 schema, AttestationRequestData memory data, address signer)
@@ -362,10 +448,10 @@ contract BaseMainnetForkTest is EASForkBase {
         AttestationRequestData memory data,
         uint256 signerPk,
         address signer,
-        bytes memory expectedRevert
+        bytes4 expectedRevert
     ) internal override returns (bytes32) {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, _digestV101(schema, data, signer));
-        if (expectedRevert.length != 0) vm.expectRevert(expectedRevert);
+        if (expectedRevert != bytes4(0)) vm.expectPartialRevert(expectedRevert);
         vm.prank(relayer);
         return IEASv101(address(eas))
             .attestByDelegation(
@@ -392,6 +478,10 @@ contract BaseSepoliaForkTest is EASForkBase {
 
     function _expectedEasVersion() internal pure override returns (string memory) {
         return "1.2.0";
+    }
+
+    function _easRelaysErc1271() internal pure override returns (bool) {
+        return true;
     }
 
     /// @dev EAS 1.2.0 typed data:
@@ -423,11 +513,11 @@ contract BaseSepoliaForkTest is EASForkBase {
         AttestationRequestData memory data,
         uint256 signerPk,
         address signer,
-        bytes memory expectedRevert
+        bytes4 expectedRevert
     ) internal override returns (bytes32) {
         uint64 deadline = uint64(block.timestamp + 1 hours);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, _digestV120(schema, data, signer, deadline));
-        if (expectedRevert.length != 0) vm.expectRevert(expectedRevert);
+        if (expectedRevert != bytes4(0)) vm.expectPartialRevert(expectedRevert);
         vm.prank(relayer);
         return eas.attestByDelegation(
             DelegatedAttestationRequest({

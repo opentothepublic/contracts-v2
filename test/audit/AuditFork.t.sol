@@ -23,6 +23,12 @@ import {
 import { ISchemaResolver } from "@ethereum-attestation-service/eas-contracts/contracts/resolver/ISchemaResolver.sol";
 
 import { OTTPRegistry } from "../../src/OTTPRegistry.sol";
+import {
+    OTTPResolver__ZeroId,
+    OTTPResolver__IdNotRegistered,
+    OTTPResolver__AttesterNotOwner,
+    OTTPResolver__ZeroRegistry
+} from "../../src/OTTPResolverErrors.sol";
 import { OTTPSubjectResolver } from "../../src/OTTPSubjectResolver.sol";
 import { OTTPObjectResolver } from "../../src/OTTPObjectResolver.sol";
 import { OTTPSchemas } from "../../src/Schemas.sol";
@@ -171,7 +177,7 @@ contract AuditForkBaseMainnet is Test {
         MultiAttestationRequest[] memory reqs = new MultiAttestationRequest[](1);
         reqs[0] = MultiAttestationRequest({ schema: subjectSchema, data: items });
         vm.prank(alice);
-        vm.expectRevert("OTTP: attester does not own this id");
+        vm.expectPartialRevert(OTTPResolver__IdNotRegistered.selector); // id 2 is unissued in this fixture
         eas.multiAttest(reqs);
 
         items[1].data = abi.encode(uint256(1), "b", "{}");

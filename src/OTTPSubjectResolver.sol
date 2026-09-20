@@ -6,6 +6,12 @@ import { Attestation } from "@ethereum-attestation-service/eas-contracts/contrac
 import { SchemaResolver } from "@ethereum-attestation-service/eas-contracts/contracts/resolver/SchemaResolver.sol";
 
 import { IOTTPRegistry } from "./IOTTPRegistry.sol";
+import {
+    OTTPResolver__ZeroId,
+    OTTPResolver__IdNotRegistered,
+    OTTPResolver__AttesterNotOwner,
+    OTTPResolver__ZeroRegistry
+} from "./OTTPResolverErrors.sol";
 
 /// @title OTTPSubjectResolver
 /// @notice EAS resolver for the OTTP Subject schema. Validates that the attester owns the claimed `ottpId`.
@@ -20,7 +26,7 @@ contract OTTPSubjectResolver is SchemaResolver {
     /// @param eas The EAS contract (Base predeploy 0x4200000000000000000000000000000000000021).
     /// @param _registry The OTTPRegistry.
     constructor(IEAS eas, IOTTPRegistry _registry) SchemaResolver(eas) {
-        require(address(_registry) != address(0), "Zero registry");
+        if (address(_registry) == address(0)) revert OTTPResolver__ZeroRegistry();
         registry = _registry;
     }
 
@@ -37,11 +43,12 @@ contract OTTPSubjectResolver is SchemaResolver {
         returns (bool)
     {
         (uint256 ottpId,,) = abi.decode(attestation.data, (uint256, string, string));
-        require(ottpId != 0, "OTTP: id is zero");
+        if (ottpId == 0) revert OTTPResolver__ZeroId();
         // Unissued IDs map to address(0). The explicit non-zero check makes the guarantee independent of EAS
-        // internals (EAS never yields a zero attester today, but this resolver is immutable).
+        // internals (spec v1.2 D1: an immutable resolver must not rely on EAS never producing a zero attester).
         address owner = registry.getWallet(ottpId);
-        require(owner != address(0) && attestation.attester == owner, "OTTP: attester does not own this id");
+        if (owner == address(0)) revert OTTPResolver__IdNotRegistered(ottpId);
+        if (attestation.attester != owner) revert OTTPResolver__AttesterNotOwner(ottpId, attestation.attester, owner);
         return true;
     }
 
