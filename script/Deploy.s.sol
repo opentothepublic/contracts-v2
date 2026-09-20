@@ -18,6 +18,10 @@ interface IVersioned {
     function version() external view returns (string memory);
 }
 
+interface IEASRegistryPointer {
+    function getSchemaRegistry() external view returns (address);
+}
+
 /// @title Deploy
 /// @notice Deploys the OTTP v2.1 primitive and registers both schemas, in spec order:
 ///         Registry → SubjectResolver → ObjectResolver → Subject schema → Object schema.
@@ -41,6 +45,10 @@ contract Deploy is Script {
         require(address(eas).code.length != 0, "Deploy: EAS predeploy missing");
         require(address(schemaRegistry).code.length != 0, "Deploy: SchemaRegistry predeploy missing");
         string memory easVersion = IVersioned(address(eas)).version();
+        require(
+            IEASRegistryPointer(address(eas)).getSchemaRegistry() == address(schemaRegistry),
+            "Deploy: EAS points at a different SchemaRegistry"
+        );
 
         vm.startBroadcast();
 
@@ -48,12 +56,11 @@ contract Deploy is Script {
         OTTPSubjectResolver subjectResolver = new OTTPSubjectResolver(eas, registry);
         OTTPObjectResolver objectResolver = new OTTPObjectResolver(eas, registry);
 
-        bytes32 subjectSchemaUid = schemaRegistry.register(
-            OTTPSchemas.SUBJECT, ISchemaResolver(address(subjectResolver)), OTTPSchemas.REVOCABLE
-        );
-        bytes32 objectSchemaUid = schemaRegistry.register(
-            OTTPSchemas.OBJECT, ISchemaResolver(address(objectResolver)), OTTPSchemas.REVOCABLE
-        );
+        // Resolver addresses are CREATE-predictable, so a third party could pre-register the identical
+        // (schema, resolver, revocable) triple to make our register() revert AlreadyExists(). The resulting record is
+        // byte-identical to ours, so tolerate it: register only if the UID is not yet taken.
+        bytes32 subjectSchemaUid = _ensureSchema(schemaRegistry, OTTPSchemas.SUBJECT, address(subjectResolver));
+        bytes32 objectSchemaUid = _ensureSchema(schemaRegistry, OTTPSchemas.OBJECT, address(objectResolver));
 
         vm.stopBroadcast();
 
@@ -78,7 +85,8 @@ contract Deploy is Script {
         console2.log("");
         console2.log("==================== OTTP v2.1 deployment ====================");
         console2.log("chain id:              ", chainId);
-        console2.log("EAS:                   ", address(eas), "(version", easVersion);
+        console2.log("EAS:                   ", address(eas));
+        console2.log("EAS version:           ", easVersion);
         console2.log("SchemaRegistry:        ", address(schemaRegistry));
         console2.log("");
         console2.log("| Contract            | Address                                    |");
@@ -102,5 +110,25 @@ contract Deploy is Script {
         console2.log("OTTP_OBJECT_SCHEMA_UID=");
         console2.logBytes32(objectSchemaUid);
         console2.log("==============================================================");
+    }
+
+    /// @dev Registers `schema` with `resolver` (revocable = false) unless an identical record already exists.
+    function _ensureSchema(ISchemaRegistry schemaRegistry, string memory schema, address resolver)
+        internal
+        returns (bytes32 uid)
+    {
+        uid = keccak256(abi.encodePacked(schema, resolver, OTTPSchemas.REVOCABLE));
+        SchemaRecord memory existing = schemaRegistry.getSchema(uid);
+        if (existing.uid == bytes32(0)) {
+            bytes32 registered = schemaRegistry.register(schema, ISchemaResolver(resolver), OTTPSchemas.REVOCABLE);
+            require(registered == uid, "Deploy: unexpected schema uid");
+        } else {
+            console2.log("Schema already registered (identical record), reusing:", schema);
+            require(
+                address(existing.resolver) == resolver && !existing.revocable
+                    && keccak256(bytes(existing.schema)) == keccak256(bytes(schema)),
+                "Deploy: pre-existing schema record differs"
+            );
+        }
     }
 }

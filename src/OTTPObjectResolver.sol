@@ -35,7 +35,10 @@ contract OTTPObjectResolver is SchemaResolver {
     {
         (, uint256 creatorId,) = abi.decode(attestation.data, (bytes32, uint256, string));
         require(creatorId != 0, "OTTP: creator id is zero");
-        require(attestation.attester == registry.getWallet(creatorId), "OTTP: attester does not own this id");
+        // Unissued IDs map to address(0). The explicit non-zero check makes the guarantee independent of EAS
+        // internals (EAS never yields a zero attester today, but this resolver is immutable).
+        address owner = registry.getWallet(creatorId);
+        require(owner != address(0) && attestation.attester == owner, "OTTP: attester does not own this id");
         return true;
     }
 

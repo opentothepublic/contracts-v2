@@ -25,6 +25,15 @@ non-revocable EAS schemas. Implements `ottp-smart-contracts-spec.md` v1.1 (ratif
 - Type: `Register(address wallet,uint256 nonce,uint256 deadline)`; `nonce = registry.nonces(wallet)`.
 - Any relayer may submit; the only possible outcome is `wallet` receiving the next ID.
 
+## Integration notes (from the independent audit, 2026-09-20)
+
+- **Delegated attestations on Base mainnet are ECDSA-only.** Base mainnet runs EAS 1.0.1, whose `attestByDelegation` uses `ECDSA.recover`; a Safe / ERC-1271 wallet can `registerFor` but must call `EAS.attest` directly (it cannot be relayed). Base Sepolia runs EAS 1.2.0 with different typed data. Build delegated typed data per chain (see `test/fork/EASFork.t.sol`).
+- **Never use EAS's `EIP712Proxy` for OTTP writes**, and never `transferId` an ID to a permissionless forwarder contract. A proxy is recorded as the attester, so an ID held by a shared proxy could be used by anyone who can drive it.
+- **`registerFor` signatures should carry short deadlines** (an hour or less). Only `registerFor` consumes a nonce; a long-lived signature left over after the wallet registered directly and later transferred its ID could be replayed to give the old wallet an unwanted fresh ID (gas griefing only; recoverable).
+- **Signature format:** 65-byte `r || s || v` with `v ∈ {27, 28}`, low-s. ERC-2098 compact signatures and `v ∈ {0, 1}` are rejected. Counterfactual (undeployed) smart accounts cannot use `registerFor` (no ERC-6492); EIP-7702 delegated EOAs can only if their delegate implements ERC-1271.
+- **Indexers must read the ID from the ABI head word** (word 0 for Subject, word 1 for Object). Solidity's `abi.decode` accepts some non-canonical string encodings that strict decoders reject; never drop a chain-accepted attestation because the strings failed to decode — treat them as raw bytes.
+- **ID #1 is first-come-first-served** the moment the registry exists. If specific low IDs matter, register them inside the deploy broadcast.
+
 ## Toolchain (pinned)
 
 - Solidity `0.8.26`, Foundry (`forge 1.7.x`), optimizer 10 000 runs, EVM `cancun`

@@ -38,7 +38,10 @@ contract OTTPSubjectResolver is SchemaResolver {
     {
         (uint256 ottpId,,) = abi.decode(attestation.data, (uint256, string, string));
         require(ottpId != 0, "OTTP: id is zero");
-        require(attestation.attester == registry.getWallet(ottpId), "OTTP: attester does not own this id");
+        // Unissued IDs map to address(0). The explicit non-zero check makes the guarantee independent of EAS
+        // internals (EAS never yields a zero attester today, but this resolver is immutable).
+        address owner = registry.getWallet(ottpId);
+        require(owner != address(0) && attestation.attester == owner, "OTTP: attester does not own this id");
         return true;
     }
 

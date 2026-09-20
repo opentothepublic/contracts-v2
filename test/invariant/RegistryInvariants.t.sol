@@ -197,11 +197,13 @@ contract RegistryInvariants is Test {
         assertEq(address(registry).balance, 0);
     }
 
-    function invariant_CallSummary() public view {
-        // Sanity: the handler actually exercised the success paths (otherwise the invariants are vacuous).
-        // Logged rather than asserted so a low-depth run does not fail spuriously.
-        uint256 total =
-            handler.callsRegister() + handler.callsRegisterFor() + handler.callsTransfer() + handler.callsRejected();
-        total; // silence unused warning
+    /// @dev Runs once after each invariant campaign: the handler must actually have exercised the success paths,
+    ///      otherwise the invariants above are vacuous. Register succeeds early in every campaign; registerFor and
+    ///      transferId succeed in most but not all short campaigns, so those are checked in aggregate by
+    ///      GapTests' BiasedRegistryInvariants rather than here.
+    function afterInvariant() public view {
+        assertGt(handler.callsRegister(), 0, "no successful register() in campaign");
+        assertGt(handler.callsRejected(), 0, "no rejected calls in campaign");
+        assertEq(handler.ghostIssued(), handler.callsRegister() + handler.callsRegisterFor(), "ghost issuance mismatch");
     }
 }

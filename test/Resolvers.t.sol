@@ -471,7 +471,7 @@ contract ResolversTest is Test {
     // ─── fuzz ──────────────────────────────────────────────────────────────────────────────────────────────
 
     function testFuzz_Subject_AcceptIffAttesterOwnsId(address attester, uint256 id) public {
-        bool owns = id != 0 && registry.getWallet(id) == attester;
+        bool owns = id != 0 && attester != address(0) && registry.getWallet(id) == attester;
         AttestationRequestData memory r = _req(_subjectData(id), EMPTY_UID);
         if (!owns) vm.expectRevert();
         vm.prank(attester);
@@ -479,7 +479,7 @@ contract ResolversTest is Test {
     }
 
     function testFuzz_Object_AcceptIffAttesterOwnsId(address attester, uint256 id, bytes32 originUid) public {
-        bool owns = id != 0 && registry.getWallet(id) == attester;
+        bool owns = id != 0 && attester != address(0) && registry.getWallet(id) == attester;
         AttestationRequestData memory r = _req(_objectData(originUid, id), EMPTY_UID);
         if (!owns) vm.expectRevert();
         vm.prank(attester);
@@ -487,7 +487,7 @@ contract ResolversTest is Test {
     }
 
     function testFuzz_Delegated_AcceptIffSignerOwnsId(address signer, address relayer_, uint256 id) public {
-        bool owns = id != 0 && registry.getWallet(id) == signer;
+        bool owns = id != 0 && signer != address(0) && registry.getWallet(id) == signer;
         AttestationRequestData memory r = _req(_subjectData(id), EMPTY_UID);
         if (!owns) vm.expectRevert();
         vm.prank(relayer_);
