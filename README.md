@@ -15,7 +15,7 @@ non-revocable EAS schemas. Implements `ottp-smart-contracts-spec.md` v1.2 (ratif
 - **Non-revocable.** Both schemas are registered with `revocable = false`. History is append-only; corrections are newer attestations. `onRevoke` denies as defense-in-depth on a path EAS never reaches.
 - **Authenticity only.** Resolvers check identity ↔ wallet and nothing else. They never read `name`, `metadata`, `originUid`, `refUID`, or `recipient`. Authority, ownership, and status are derived offchain per `ottp-indexer-rules.md`.
 - **One ID per wallet.** `transferId` requires an ID-free target. An old wallet may later register a fresh ID; it never gets the old one back.
-- **Every registration consumes the wallet's EIP-712 nonce** (either path), so a `registerFor` signature made before any registration is dead afterwards.
+- **Every registration consumes the wallet's EIP-712 nonce** (either path), so a `registerFor` signature made at the then-current nonce is dead after any registration of that wallet. Clients must sign exactly `nonces(wallet)`.
 - **Delegated writes validate the signer.** EAS stores the signer as `attestation.attester` for `attestByDelegation`, so relayed and direct attestations are checked identically.
 - **No funds.** Neither the registry nor the resolvers accept ETH.
 - **Generational migration.** All state is readable through public getters (`getWallet`, `getId`, `totalRegistered`, `nextId`, `idToWallet`, `walletToId`, `nonces`) so a future generation can prove v2.1 records.
@@ -46,7 +46,11 @@ Resolver errors live in `src/OTTPResolverErrors.sol` so SDKs decode one set. Whe
 ## Integration notes (from the independent audit, 2026-09-20)
 
 - **Delegated attestations on Base mainnet are ECDSA-only.** Base mainnet runs EAS 1.0.1, whose `attestByDelegation` uses `ECDSA.recover`; a Safe / ERC-1271 wallet can `registerFor` but must call `EAS.attest` directly (it cannot be relayed). Base Sepolia runs EAS 1.2.0 with different typed data. Build delegated typed data per chain (see `test/fork/EASFork.t.sol`).
-- **Never use EAS's `EIP712Proxy` for OTTP writes**, and never `transferId` an ID to a permissionless forwarder contract. A proxy is recorded as the attester, so an ID held by a shared proxy could be used by anyone who can drive it.
+- **Never use EAS's `EIP712Proxy` for OTTP writes**, and never `transferId` an ID to a permissionless forwarder contract. A proxy is recorded as the attester, so an ID held by a shared proxy could be used by anyone who can drive it. The live mainnet EIP712Proxy at `0xF095fE4b23958b08D38e52d5d5674bBF0C03cbF6` is one; a client-side blocklist of known forwarders for `transferId` targets is sensible.
+- **`transferId` is one-step and permanent**; confirm the target address in any UI. Transferring to a dead address destroys the identity.
+- **Relayers must cap gas per `registerFor`.** A hostile ERC-1271 wallet can burn most of the relayer's gas inside the `isValidSignature` staticcall (state is untouched). Simulate with `eth_estimateGas` and set a gas limit.
+- **Any revert from EAS means "not accepted".** Malformed attestation data can surface as an empty revert or as `Panic(0x41)` from `abi.decode`; do not special-case revert shapes.
+- **The EAS/SchemaRegistry predeploys are upgradeable proxies** administered by Base. The resolvers' guarantees are properties of the installed EAS implementation; this is an accepted, explicit trust assumption (spec v1.2, Security).
 - **Stale `registerFor` signatures are dead by construction** (spec v1.2 D6): every registration consumes the nonce, so a signature made before the wallet registered by any path cannot be replayed later. Short deadlines remain good hygiene, not a security dependency.
 - **Signature format:** 65-byte `r || s || v` with `v ∈ {27, 28}`, low-s. ERC-2098 compact signatures and `v ∈ {0, 1}` are rejected. Counterfactual (undeployed) smart accounts cannot use `registerFor` (no ERC-6492); EIP-7702 delegated EOAs can only if their delegate implements ERC-1271.
 - **Indexers must read the ID from the ABI head word** (word 0 for Subject, word 1 for Object). Solidity's `abi.decode` accepts some non-canonical string encodings that strict decoders reject; never drop a chain-accepted attestation because the strings failed to decode — treat them as raw bytes.

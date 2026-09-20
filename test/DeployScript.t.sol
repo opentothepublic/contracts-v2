@@ -66,15 +66,13 @@ contract DeployScriptTest is Test {
         _runAndAssert();
     }
 
-    /// @dev Mainnet guard and opt-in live in ONE test: vm.setEnv is process-wide and tests run in parallel, so
-    ///      splitting "false" and "true" into two tests races.
+    /// @dev The opt-in is passed explicitly via runWith(): vm.setEnv is process-wide and test contracts run in
+    ///      parallel, so env-based negative tests race with other files that set the flag.
     function test_D5_ScriptMainnet_RefusesWithoutOptIn_ThenRegistersExactUidsWithOptIn() public {
         vm.chainId(OTTPSchemas.BASE_MAINNET);
-        vm.setEnv("ALLOW_MAINNET", "false");
         Deploy d = new Deploy();
         vm.expectRevert("Deploy: set ALLOW_MAINNET=true to deploy to Base mainnet");
-        d.run();
-        vm.setEnv("ALLOW_MAINNET", "true");
+        d.runWith(false);
         _runAndAssert();
     }
 
@@ -108,7 +106,7 @@ contract DeployScriptTest is Test {
 
     function _runAndAssert() internal {
         Deploy d = new Deploy();
-        d.run();
+        d.runWith(true);
         (address reg, address subj, address obj, bytes32 subjUid, bytes32 objUid) = d.last();
 
         assertEq(subjUid, keccak256(abi.encodePacked(SUBJECT, subj, false)), "subject uid derivation");

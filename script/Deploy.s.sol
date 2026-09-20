@@ -46,14 +46,21 @@ contract Deploy is Script {
             (_last.registry, _last.subjectResolver, _last.objectResolver, _last.subjectSchemaUid, _last.objectSchemaUid);
     }
 
+    /// @notice Entry point for `forge script`. Reads the ALLOW_MAINNET opt-in from the environment.
     function run() external {
+        runWith(vm.envOr("ALLOW_MAINNET", false));
+    }
+
+    /// @notice Same as run(), with the mainnet opt-in passed explicitly (tests use this to avoid the process-wide
+    ///         env var; the guard logic is identical).
+    function runWith(bool allowMainnet) public {
         uint256 chainId = block.chainid;
         require(
             chainId == OTTPSchemas.BASE_MAINNET || chainId == OTTPSchemas.BASE_SEPOLIA,
             "Deploy: only Base mainnet (8453) or Base Sepolia (84532)"
         );
         if (chainId == OTTPSchemas.BASE_MAINNET) {
-            require(vm.envOr("ALLOW_MAINNET", false), "Deploy: set ALLOW_MAINNET=true to deploy to Base mainnet");
+            require(allowMainnet, "Deploy: set ALLOW_MAINNET=true to deploy to Base mainnet");
         }
 
         IEAS eas = IEAS(OTTPSchemas.EAS);

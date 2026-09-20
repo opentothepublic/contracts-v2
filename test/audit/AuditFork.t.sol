@@ -211,11 +211,9 @@ contract AuditForkBaseMainnet is Test {
     // F6: the actual Deploy script runs end-to-end on a mainnet fork with ALLOW_MAINNET=true and refuses without it.
     function test_F6_DeployScriptOnMainnetFork() public {
         Deploy script = new Deploy();
-        vm.setEnv("ALLOW_MAINNET", "false");
         vm.expectRevert("Deploy: set ALLOW_MAINNET=true to deploy to Base mainnet");
-        script.run();
-        vm.setEnv("ALLOW_MAINNET", "true");
-        script.run();
+        script.runWith(false);
+        script.runWith(true);
     }
 }
 
