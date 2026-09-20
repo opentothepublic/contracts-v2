@@ -611,6 +611,7 @@ contract OTTPRegistryTest is Test {
 
     function testFuzz_Register_ManyWalletsSequential(uint8 n) public {
         for (uint256 i = 1; i <= n; i++) {
+            // forge-lint: disable-next-line(unsafe-typecast)
             address w = address(uint160(0x1000 + i));
             vm.prank(w);
             assertEq(registry.register(), i);
