@@ -50,7 +50,7 @@ int_types = "long"
 [profile.ci]
 [profile.ci.fuzz]
 runs = 2000
-seed = "0x0ttp"
+seed = "0x0774"
 [profile.ci.invariant]
 runs = 256
 depth = 64
