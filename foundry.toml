@@ -45,3 +45,12 @@ line_length = 120
 tab_width = 4
 bracket_spacing = true
 int_types = "long"
+
+# CI: same as default but deterministic fuzz seed and no local-only settings.
+[profile.ci]
+[profile.ci.fuzz]
+runs = 2000
+seed = "0x0ttp"
+[profile.ci.invariant]
+runs = 256
+depth = 64

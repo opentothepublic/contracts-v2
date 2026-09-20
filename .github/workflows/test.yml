@@ -1,0 +1,48 @@
+name: test
+
+on:
+  push:
+    branches: [main, "v2.*"]
+  pull_request:
+
+env:
+  FOUNDRY_PROFILE: ci
+
+jobs:
+  forge:
+    name: forge build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+
+      - name: forge fmt --check
+        run: forge fmt --check
+
+      - name: forge build
+        run: forge build --sizes
+
+      - name: forge test (unit + fuzz + invariant)
+        run: forge test --no-match-path 'test/fork/*' -vvv
+
+      - name: forge test (fork, real EAS on Base mainnet + Sepolia)
+        # Public RPCs; single-threaded to stay under their rate limits.
+        run: FORK_TESTS=true forge test --match-path 'test/fork/*' --threads 1 -vv
+        continue-on-error: true
+
+  slither:
+    name: slither
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: crytic/slither-action@v0.4.0
+        with:
+          fail-on: medium
+          slither-args: --filter-paths "(lib/|test/|script/)"
