@@ -24,7 +24,9 @@ contract EpochTest is Test {
 
     function _move(uint256 id, address to) internal {
         vm.prank(registry.getWallet(id));
-        registry.transferId(id, to);
+        registry.proposeTransfer(id, to);
+        vm.prank(to);
+        registry.acceptId(id);
     }
 
     function test_Epoch_ZeroAtIssuanceBothPaths() public {
@@ -42,9 +44,12 @@ contract EpochTest is Test {
     function test_Epoch_IncrementsByOneOnEveryOwnershipChange() public {
         vm.prank(alice);
         registry.register();
+        vm.prank(alice);
+        registry.proposeTransfer(1, carol);
         vm.expectEmit(true, true, true, true);
         emit Transferred(1, alice, carol);
-        _move(1, carol);
+        vm.prank(carol);
+        registry.acceptId(1);
         assertEq(registry.ownerEpoch(1), 1);
         _move(1, dave);
         assertEq(registry.ownerEpoch(1), 2);
@@ -69,7 +74,7 @@ contract EpochTest is Test {
         registry.register();
         vm.prank(alice);
         vm.expectRevert();
-        registry.transferId(1, carol);
+        registry.proposeTransfer(1, carol);
         assertEq(registry.ownerEpoch(1), 0);
     }
 

@@ -71,7 +71,9 @@ contract AuditRegistryTest is Test {
         assertEq(registry.nonces(alice), 1, "register() consumes the signature nonce (D6)");
 
         vm.prank(alice);
-        registry.transferId(1, alice2);
+        registry.proposeTransfer(1, alice2);
+        vm.prank(alice2);
+        registry.acceptId(1);
         assertEq(registry.getId(alice), 0);
 
         // The stale signature is worthless now.
@@ -82,7 +84,9 @@ contract AuditRegistryTest is Test {
 
         // alice2 can still move id 1 back to `alice`.
         vm.prank(alice2);
-        registry.transferId(1, alice);
+        registry.proposeTransfer(1, alice);
+        vm.prank(alice);
+        registry.acceptId(1);
         assertEq(registry.getId(alice), 1);
     }
 

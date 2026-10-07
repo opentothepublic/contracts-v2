@@ -283,7 +283,9 @@ contract ResolversTest is Test {
         address alice2 = makeAddr("alice2");
         _attestSubject(alice, 1);
         vm.prank(alice);
-        registry.transferId(1, alice2);
+        registry.proposeTransfer(1, alice2);
+        vm.prank(alice2);
+        registry.acceptId(1);
 
         vm.prank(alice);
         vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
@@ -299,7 +301,9 @@ contract ResolversTest is Test {
     function test_AfterTransfer_OldWalletReRegistersAndOnlyOwnsNewId() public {
         address alice2 = makeAddr("alice2");
         vm.prank(alice);
-        registry.transferId(1, alice2);
+        registry.proposeTransfer(1, alice2);
+        vm.prank(alice2);
+        registry.acceptId(1);
         vm.prank(alice);
         uint256 newId = registry.register(); // 3
         assertEq(newId, 3);

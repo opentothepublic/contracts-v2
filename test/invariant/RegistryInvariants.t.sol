@@ -88,6 +88,9 @@ contract RegistryHandler is Test {
         }
     }
 
+    /// @dev Two-step transfer (addendum B1): the owner proposes, the target accepts. Both steps are driven here so
+    ///      ownership keeps moving; dedicated authority invariants (test/invariant/AuthorityInvariants.t.sol) cover
+    ///      the steps separately.
     function transferId(uint256 fromSeed, uint256 toSeed, uint256 idSeed) external {
         uint256 fi = _actor(fromSeed);
         address from = actors[fi];
@@ -96,7 +99,9 @@ contract RegistryHandler is Test {
         // mostly target the caller's real ID, sometimes a random/unissued one
         uint256 id = idSeed % 4 == 0 ? idSeed : owned;
         vm.prank(from);
-        try registry.transferId(id, to) {
+        try registry.proposeTransfer(id, to) {
+            vm.prank(to);
+            registry.acceptId(id);
             assertEq(id, owned, "transferred an ID the caller did not own");
             assertTrue(id != 0, "transferred id 0");
             ghostOwner[id] = to;
@@ -112,8 +117,14 @@ contract RegistryHandler is Test {
         address to = actors[_actor(toSeed)];
         uint256 id = idSeed % (registry.totalRegistered() + 2);
         vm.prank(stranger);
-        try registry.transferId(id, to) {
-            revert("stranger moved an ID");
+        try registry.proposeTransfer(id, to) {
+            revert("stranger proposed moving an ID");
+        } catch {
+            callsRejected++;
+        }
+        vm.prank(to);
+        try registry.acceptId(id) {
+            revert("an ID moved without its owner's proposal");
         } catch {
             callsRejected++;
         }
@@ -176,7 +187,7 @@ contract RegistryInvariants is Test {
     }
 
     /// @dev Every ID's owner matches the ghost model, which is only updated by successful register/registerFor
-    ///      (initial owner) and successful owner-initiated transferId. Hence no ID is ever reassigned any other way.
+    ///      (initial owner) and successful owner-proposed, target-accepted transfers. Hence no ID is ever reassigned any other way.
     function invariant_OwnershipMatchesGhostModel() public view {
         uint256 total = registry.totalRegistered();
         for (uint256 id = 1; id <= total; id++) {

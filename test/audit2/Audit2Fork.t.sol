@@ -286,7 +286,9 @@ abstract contract Audit2ForkBase is Test {
     // ── F6: after transferId through the real core ──
     function test_F6_AfterTransfer() public {
         vm.prank(alice);
-        registry.transferId(1, mallory);
+        registry.proposeTransfer(1, mallory);
+        vm.prank(mallory);
+        registry.acceptId(1);
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(OTTPResolver__AttesterNotOwner.selector, 1, alice, mallory));
         eas.attest(AttestationRequest({ schema: subjectSchema, data: _data(_subject(1)) }));
@@ -362,9 +364,17 @@ contract Audit2ForkMainnet is Audit2ForkBase {
         assertFalse(ok);
         assertEq(ret, abi.encodeWithSelector(OTTPResolver__AttesterNotOwner.selector, 1, address(PROXY), alice));
 
-        // alice parks id 1 in the proxy (documented "never do this"); now mallory attests as id 1
+        // Addendum B1 (PROPOSED): alice can no longer park id 1 in the proxy. The proxy cannot call acceptId and has
+        // no ERC-1271, so a proposal to it can never complete.
         vm.prank(alice);
-        registry.transferId(1, address(PROXY));
+        registry.proposeTransfer(1, address(PROXY));
+        vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
+        registry.acceptIdBySig(1, address(PROXY), block.timestamp, new bytes(65));
+        assertEq(registry.getWallet(1), alice);
+        // Resolver-level evidence kept for the record: IF a forwarder ever held an id (unreachable under B1;
+        // simulated with a prank), anyone could attest as it.
+        vm.prank(address(PROXY));
+        registry.acceptId(1);
         (ok, ret) = _viaProxy(subjectSchema, _data(_subject(1)), malloryPk, mallory, dl);
         assertTrue(ok, "anyone can attest as an id held by a permissionless proxy");
         assertEq(eas.getAttestation(abi.decode(ret, (bytes32))).attester, address(PROXY));

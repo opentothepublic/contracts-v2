@@ -39,7 +39,7 @@ contract ProxyLike {
     }
 
     function transferOut(OTTPRegistry r, uint256 id, address to) external {
-        r.transferId(id, to);
+        r.proposeTransfer(id, to);
     }
 }
 
@@ -203,9 +203,12 @@ contract AuditResolversTest is Test {
         vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         proxy.attestVia(subjectSchema, _req(abi.encode(uint256(1), "alice", "{}")));
 
-        // alice (mistakenly) parks her ID in the proxy
+        // alice (mistakenly) parks her ID in the proxy. Addendum B1 (PROPOSED): unreachable for this ProxyLike, which
+        // cannot call acceptId; the acceptance is simulated with a prank to keep the resolver evidence.
         vm.prank(alice);
-        registry.transferId(1, address(proxy));
+        registry.proposeTransfer(1, address(proxy));
+        vm.prank(address(proxy));
+        registry.acceptId(1);
 
         // now mallory attests AS id 1 through the shared proxy
         vm.prank(mallory);
@@ -214,6 +217,8 @@ contract AuditResolversTest is Test {
         // and mallory can even try to walk the ID out if the proxy exposes any arbitrary-call surface
         vm.prank(mallory);
         proxy.transferOut(registry, 1, mallory);
+        vm.prank(mallory); // two-step transfer: the thief accepts into a wallet they control
+        registry.acceptId(1);
         assertEq(registry.getWallet(1), mallory, "id stolen through a permissionless proxy holding it");
     }
 

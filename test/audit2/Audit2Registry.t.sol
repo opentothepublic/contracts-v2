@@ -136,7 +136,9 @@ contract Audit2RegistryTest is Test {
         vm.prank(alice);
         registry.register(); // id 1, nonce 1
         vm.prank(alice);
-        registry.transferId(1, bob);
+        registry.proposeTransfer(1, bob);
+        vm.prank(bob);
+        registry.acceptId(1);
         assertEq(registry.getId(alice), 0);
         vm.prank(relayer);
         vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__InvalidSignature.selector, alice));
@@ -156,7 +158,9 @@ contract Audit2RegistryTest is Test {
         vm.prank(relayer);
         registry.registerFor(alice, deadline, sig);
         vm.prank(alice);
-        registry.transferId(1, bob);
+        registry.proposeTransfer(1, bob);
+        vm.prank(bob);
+        registry.acceptId(1);
         vm.prank(relayer);
         vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__InvalidSignature.selector, alice));
         registry.registerFor(alice, deadline, sig);
@@ -202,20 +206,22 @@ contract Audit2RegistryTest is Test {
         assertEq(registry.nonces(alice), 1, "nonce not burned by WalletAlreadyRegistered");
         // ...and that same signature becomes usable if alice transfers away (it was signed at nonce 1)
         vm.prank(alice);
-        registry.transferId(1, bob);
+        registry.proposeTransfer(1, bob);
+        vm.prank(bob);
+        registry.acceptId(1);
         vm.prank(relayer);
         assertEq(registry.registerFor(alice, deadline, atNonce1), 2);
 
         // (e) transferId reverts never touch nonces
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__ZeroAddress.selector));
-        registry.transferId(2, address(0));
+        registry.proposeTransfer(2, address(0));
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__TargetAlreadyRegistered.selector, bob, 1));
-        registry.transferId(2, bob);
+        registry.proposeTransfer(2, bob);
         vm.prank(carol);
         vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__NotOwner.selector, 2, carol));
-        registry.transferId(2, carol);
+        registry.proposeTransfer(2, carol);
         assertEq(registry.nonces(alice), 2);
         assertEq(registry.nonces(bob), 0, "transfer recipient's nonce untouched");
         (good);
@@ -270,17 +276,19 @@ contract Audit2RegistryTest is Test {
                 uint256 toId = registry.getId(w[to]);
                 if (id != 0 && toId == 0) {
                     vm.prank(a);
-                    registry.transferId(id, w[to]);
+                    registry.proposeTransfer(id, w[to]);
+                    vm.prank(w[to]);
+                    registry.acceptId(id);
                 } else if (id == 0) {
                     vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__NotOwner.selector, 0, a));
                     vm.prank(a);
-                    registry.transferId(0, w[to]);
+                    registry.proposeTransfer(0, w[to]);
                 } else {
                     vm.expectRevert(
                         abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__TargetAlreadyRegistered.selector, w[to], toId)
                     );
                     vm.prank(a);
-                    registry.transferId(id, w[to]);
+                    registry.proposeTransfer(id, w[to]);
                 }
             }
             // invariants after every op
@@ -311,7 +319,9 @@ contract Audit2RegistryTest is Test {
         vm.prank(alice);
         registry.register(); // nonce -> 1
         vm.prank(alice);
-        registry.transferId(1, bob);
+        registry.proposeTransfer(1, bob);
+        vm.prank(bob);
+        registry.acceptId(1);
         vm.prank(relayer);
         assertEq(registry.registerFor(alice, deadline, future), 2, "future-nonce signature is now live");
     }
@@ -375,28 +385,28 @@ contract Audit2RegistryTest is Test {
         // NotOwner(id, caller): unissued id, id 0, foreign id
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__NotOwner.selector, 1, bob));
-        registry.transferId(1, carol);
+        registry.proposeTransfer(1, carol);
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__NotOwner.selector, 0, bob));
-        registry.transferId(0, carol);
+        registry.proposeTransfer(0, carol);
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__NotOwner.selector, 99, bob));
-        registry.transferId(99, carol);
+        registry.proposeTransfer(99, carol);
 
         // ZeroAddress()
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__ZeroAddress.selector));
-        registry.transferId(1, address(0));
+        registry.proposeTransfer(1, address(0));
 
         // TargetAlreadyRegistered(target, existingId) — including self-transfer
         vm.prank(bob);
         registry.register(); // 2
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__TargetAlreadyRegistered.selector, bob, 2));
-        registry.transferId(1, bob);
+        registry.proposeTransfer(1, bob);
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__TargetAlreadyRegistered.selector, alice, 1));
-        registry.transferId(1, alice);
+        registry.proposeTransfer(1, alice);
     }
 
     /// D4-2: the deployed runtime bytecode contains no `Error(string)` selector, i.e. no string revert survives.
@@ -540,23 +550,27 @@ contract Audit2RegistryTest is Test {
         vm.assume(to != address(0));
         vm.prank(address(0));
         vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__NotOwner.selector, id, address(0)));
-        registry.transferId(id, to);
+        registry.proposeTransfer(id, to);
         assertEq(registry.getWallet(id), address(0));
         assertEq(registry.getId(to), 0);
     }
 
     /// A transfer to a contract with no way to call back (e.g. the registry itself) is accepted and permanent.
     /// INFO: no two-step / acceptance; a typo in newWallet destroys the identity (design: no admin override).
-    function test_Info_TransferToDeadAddressIsPermanent() public {
+    /// Addendum B1 (PROPOSED) changes this Info finding: under one-step transferId, sending an id to a dead address
+    /// (here the registry itself, which never calls out) destroyed it. Under two-step transfer the dead address can
+    /// neither call acceptId nor produce a signature, so the id stays with the owner, who can cancel.
+    function test_Info_TransferToDeadAddressIsNowImpossible() public {
         vm.prank(alice);
         registry.register();
         vm.prank(alice);
-        registry.transferId(1, address(registry));
-        assertEq(registry.getWallet(1), address(registry));
-        // nobody can move it: only msg.sender == registry could, and the registry never calls itself
+        registry.proposeTransfer(1, address(registry));
+        vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__InvalidSignature.selector, address(registry)));
+        registry.acceptIdBySig(1, address(registry), block.timestamp, new bytes(65));
+        assertEq(registry.getWallet(1), alice, "id never left the owner");
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__NotOwner.selector, 1, alice));
-        registry.transferId(1, alice);
+        registry.cancelTransfer(1);
+        assertEq(registry.pendingTransferOf(1), address(0));
     }
 
     /// Events: exactly one Registered per registration, one Transferred per transfer, with the right args.
@@ -565,10 +579,12 @@ contract Audit2RegistryTest is Test {
         emit Registered(1, alice);
         vm.prank(alice);
         registry.register();
+        vm.prank(alice);
+        registry.proposeTransfer(1, bob);
         vm.expectEmit(true, true, true, true, address(registry));
         emit Transferred(1, alice, bob);
-        vm.prank(alice);
-        registry.transferId(1, bob);
+        vm.prank(bob);
+        registry.acceptId(1);
     }
 
     /// No ETH accepted anywhere on the registry.

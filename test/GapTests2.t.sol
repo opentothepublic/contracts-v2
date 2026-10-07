@@ -262,7 +262,9 @@ contract Gap2ResolverErrorParamsTest is Test {
     function test_D4_AfterTransfer_OwnerParameterIsCurrentWallet() public {
         address alice2 = makeAddr("alice2");
         vm.prank(alice);
-        registry.transferId(1, alice2);
+        registry.proposeTransfer(1, alice2);
+        vm.prank(alice2);
+        registry.acceptId(1);
 
         vm.prank(alice);
         vm.expectRevert(_notOwner(1, alice, alice2));
@@ -420,7 +422,9 @@ contract Gap2RegistryTest is Test {
         registry.register();
         address bob = makeAddr("bob");
         vm.prank(alice);
-        registry.transferId(1, bob);
+        registry.proposeTransfer(1, bob);
+        vm.prank(bob);
+        registry.acceptId(1);
         vm.prank(alice);
         registry.register(); // id 2
 

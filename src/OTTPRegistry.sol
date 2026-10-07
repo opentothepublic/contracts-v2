@@ -7,10 +7,11 @@ import { SignatureChecker } from "@openzeppelin/contracts/utils/cryptography/Sig
 import { IOTTPRegistry } from "./IOTTPRegistry.sol";
 
 /// @title OTTPRegistry
-/// @notice Issues sequential, permanent OTTP IDs (like Farcaster FIDs). One ID per wallet; transferable
-///         by the current owner only.
+/// @notice Issues sequential, permanent OTTP IDs (like Farcaster FIDs). One ID per wallet. An ID moves only with
+///         the receiving wallet's own consent (two-step transfer).
 /// @dev Immutable by design: no admin, no proxy, no pause, no owner. The deployer has no special powers.
-///      Implements OTTP v2 Smart Contract Specification v1.1 (July 2026).
+///      Implements OTTP v2 Smart Contract Specification v1.2 plus the authority addendum
+///      (`specs/ottp-contracts-addendum-authority-PROPOSED.md`, PROPOSED — pending ratification).
 ///      Upgrades are generational: a future registry proves records on this one through the public getters.
 contract OTTPRegistry is IOTTPRegistry, EIP712 {
     /// @notice Next ID to issue. Starts at 1; 0 is reserved for "no ID".
@@ -35,17 +36,41 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
     error OTTPRegistry__WalletAlreadyRegistered(address wallet, uint256 existingId);
     /// @notice msg.sender is not the current wallet of the ID (or the ID is unissued).
     error OTTPRegistry__NotOwner(uint256 id, address caller);
-    /// @notice transferId target already holds an OTTP ID (no consolidation, by design).
+    /// @notice The receiving wallet already holds an OTTP ID (no consolidation, by design).
     error OTTPRegistry__TargetAlreadyRegistered(address target, uint256 existingId);
-    /// @notice registerFor deadline has passed.
+    /// @notice Signature deadline has passed.
     error OTTPRegistry__SignatureExpired(uint256 deadline, uint256 blockTimestamp);
-    /// @notice registerFor signature did not verify for `wallet` (ECDSA or ERC-1271).
+    /// @notice Signature did not verify for `wallet` (ECDSA or ERC-1271) at its current nonce (and the ID's epoch).
     error OTTPRegistry__InvalidSignature(address wallet);
 
     /// @notice A new ID was claimed (both registration paths).
     event Registered(uint256 indexed id, address indexed wallet);
-    /// @notice An ID moved to a new wallet.
+    /// @notice An ID moved to a new wallet. Emitted on every ownership-change path; all granted authority is now void.
     event Transferred(uint256 indexed id, address indexed oldWallet, address indexed newWallet);
+
+    // ─── B1: two-step transfer (PROPOSED) ──────────────────────────────────────────────────────────────────
+
+    struct PendingTransfer {
+        address newWallet;
+        uint96 epoch;
+    }
+
+    /// @dev Owner-proposed transfer per ID; live only while `epoch == ownerEpoch[id]`.
+    mapping(uint256 id => PendingTransfer) internal _pendingTransfer;
+
+    /// @dev keccak256("AcceptId(uint256 id,address wallet,uint256 epoch,uint256 nonce,uint256 deadline)")
+    bytes32 public constant ACCEPT_ID_TYPEHASH =
+        keccak256("AcceptId(uint256 id,address wallet,uint256 epoch,uint256 nonce,uint256 deadline)");
+
+    /// @notice cancelTransfer: there is no live pending transfer for the ID.
+    error OTTPRegistry__NoPendingTransfer(uint256 id);
+    /// @notice accept: there is no live pending move of the ID to `wallet`.
+    error OTTPRegistry__NoPendingMove(uint256 id, address wallet);
+
+    /// @notice The owner proposed moving `id` to `newWallet`; nothing moves until `newWallet` accepts.
+    event TransferProposed(uint256 indexed id, address indexed owner, address indexed newWallet, uint256 epoch);
+    /// @notice The owner withdrew the pending transfer.
+    event TransferCancelled(uint256 indexed id, address indexed newWallet);
 
     /// @dev EIP-712 domain: name "OTTPRegistry", version "2", chainId = block.chainid, verifyingContract = this.
     ///      Exposed via ERC-5267 `eip712Domain()` (inherited from OpenZeppelin EIP712).
@@ -75,15 +100,45 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
         return _register(wallet);
     }
 
-    /// @notice Transfer your OTTP ID to a new wallet (key rotation / wallet migration).
-    /// @dev Only the current wallet may call. Target must be ID-free (no consolidation, by design).
-    ///      No signature variant: transfers are rare and high-stakes; the owner pays gas directly.
-    /// @param id The ID to move. Must be owned by msg.sender.
-    /// @param newWallet The receiving wallet. Must be non-zero and hold no ID.
-    function transferId(uint256 id, address newWallet) external {
+    // ─── B1: two-step transfer (PROPOSED) ──────────────────────────────────────────────────────────────────
+
+    /// @notice Propose moving your ID to `newWallet` (key rotation / wallet migration). Nothing moves until
+    ///         `newWallet` accepts with its own call or signature.
+    /// @dev Owner only. `newWallet` must be non-zero and ID-free, now and at acceptance. Overwrites any earlier
+    ///      proposal. The owner pays gas directly; there is no signature variant of proposing.
+    function proposeTransfer(uint256 id, address newWallet) external {
         _checkOwner(id);
         _checkReceivable(newWallet);
-        _move(id, newWallet);
+        uint96 epoch = ownerEpoch[id];
+        _pendingTransfer[id] = PendingTransfer({ newWallet: newWallet, epoch: epoch });
+        emit TransferProposed(id, msg.sender, newWallet, epoch);
+    }
+
+    /// @notice Withdraw your pending transfer proposal.
+    function cancelTransfer(uint256 id) external {
+        _checkOwner(id);
+        address target = pendingTransferOf(id);
+        if (target == address(0)) revert OTTPRegistry__NoPendingTransfer(id);
+        delete _pendingTransfer[id];
+        emit TransferCancelled(id, target);
+    }
+
+    /// @notice Accept ID `id` into msg.sender, completing a pending move to msg.sender.
+    function acceptId(uint256 id) external {
+        _accept(id, msg.sender);
+    }
+
+    /// @notice Gasless acceptId: `wallet` signs AcceptId(id, wallet, ownerEpoch[id], nonces[wallet], deadline).
+    /// @dev Any relayer may submit; the only possible outcome is `id` moving into `wallet` on terms it signed.
+    function acceptIdBySig(uint256 id, address wallet, uint256 deadline, bytes calldata signature) external {
+        _checkDeadline(deadline);
+        _checkSignature(
+            wallet,
+            keccak256(abi.encode(ACCEPT_ID_TYPEHASH, id, wallet, ownerEpoch[id], nonces[wallet], deadline)),
+            signature
+        );
+        _useNonce(wallet);
+        _accept(id, wallet);
     }
 
     /// @inheritdoc IOTTPRegistry
@@ -99,6 +154,12 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
     /// @inheritdoc IOTTPRegistry
     function totalRegistered() external view returns (uint256) {
         return nextId - 1;
+    }
+
+    /// @notice Live pending-transfer target for `id`, or address(0).
+    function pendingTransferOf(uint256 id) public view returns (address) {
+        PendingTransfer memory p = _pendingTransfer[id];
+        return p.epoch == ownerEpoch[id] ? p.newWallet : address(0);
     }
 
     /// @dev Shared issuance path for register() and registerFor(). Both callers consume the wallet's nonce first
@@ -117,22 +178,31 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
     }
 
     /// @dev The single ownership-change path: updates both mappings, bumps the epoch (voiding every granted
-    ///      authority), and emits Transferred.
+    ///      authority), deletes pending moves, and emits Transferred.
     function _move(uint256 id, address newWallet) internal returns (address old) {
         old = idToWallet[id];
         walletToId[old] = 0;
         idToWallet[id] = newWallet;
         walletToId[newWallet] = id;
         ownerEpoch[id] += 1;
+        delete _pendingTransfer[id];
         emit Transferred(id, old, newWallet);
+    }
+
+    /// @dev Accept rules, in order: (1) a live pending move of `id` to `wallet`; (2) `wallet` still ID-free;
+    ///      (3) _move. `wallet == 0` never matches (an empty record reads as target 0).
+    function _accept(uint256 id, address wallet) internal {
+        if (wallet == address(0) || pendingTransferOf(id) != wallet) revert OTTPRegistry__NoPendingMove(id, wallet);
+        uint256 existing = walletToId[wallet];
+        if (existing != 0) revert OTTPRegistry__TargetAlreadyRegistered(wallet, existing);
+        _move(id, wallet);
     }
 
     /// @dev Increments `nonces[signer]`; the single place any nonce moves. Signature paths call it AFTER verifying
     ///      a signature made over the current nonce, so an ERC-1271 wallet sees the pre-increment value during
     ///      `isValidSignature` (unchanged from v1.2).
-    function _useNonce(address signer) internal returns (uint256 current) {
-        current = nonces[signer];
-        nonces[signer] = current + 1;
+    function _useNonce(address signer) internal {
+        nonces[signer] += 1;
     }
 
     function _checkDeadline(uint256 deadline) internal view {

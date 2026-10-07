@@ -96,11 +96,13 @@ contract OTTPRegistryTest is Test {
     function test_TransferId_Success() public {
         vm.prank(alice);
         registry.register();
+        vm.prank(alice);
+        registry.proposeTransfer(1, bob);
 
         vm.expectEmit(true, true, true, true, address(registry));
         emit Transferred(1, alice, bob);
-        vm.prank(alice);
-        registry.transferId(1, bob);
+        vm.prank(bob);
+        registry.acceptId(1);
 
         assertEq(registry.getWallet(1), bob);
         assertEq(registry.getId(bob), 1);
@@ -113,7 +115,9 @@ contract OTTPRegistryTest is Test {
         vm.prank(alice);
         registry.register();
         vm.prank(alice);
-        registry.transferId(1, bob);
+        registry.proposeTransfer(1, bob);
+        vm.prank(bob);
+        registry.acceptId(1);
         // alice is ID-free now; a fresh registration gives her a brand-new ID, never #1 back
         vm.prank(alice);
         assertEq(registry.register(), 2);
@@ -125,7 +129,7 @@ contract OTTPRegistryTest is Test {
         registry.register();
         vm.prank(bob);
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
-        registry.transferId(1, carol);
+        registry.proposeTransfer(1, carol);
         assertEq(registry.getWallet(1), alice);
     }
 
@@ -134,7 +138,7 @@ contract OTTPRegistryTest is Test {
         registry.register();
         vm.prank(alice);
         vm.expectRevert(OTTPRegistry.OTTPRegistry__ZeroAddress.selector);
-        registry.transferId(1, address(0));
+        registry.proposeTransfer(1, address(0));
     }
 
     function test_TransferId_TargetAlreadyRegisteredReverts() public {
@@ -144,7 +148,7 @@ contract OTTPRegistryTest is Test {
         registry.register();
         vm.prank(alice);
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__TargetAlreadyRegistered.selector);
-        registry.transferId(1, bob);
+        registry.proposeTransfer(1, bob);
         assertEq(registry.getWallet(1), alice);
         assertEq(registry.getWallet(2), bob);
     }
@@ -154,7 +158,7 @@ contract OTTPRegistryTest is Test {
         registry.register();
         vm.prank(alice);
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__TargetAlreadyRegistered.selector);
-        registry.transferId(1, alice);
+        registry.proposeTransfer(1, alice);
     }
 
     function test_TransferId_UnissuedIdReverts() public {
@@ -162,13 +166,13 @@ contract OTTPRegistryTest is Test {
         registry.register();
         vm.prank(alice);
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
-        registry.transferId(2, bob);
+        registry.proposeTransfer(2, bob);
         vm.prank(alice);
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
-        registry.transferId(0, bob);
+        registry.proposeTransfer(0, bob);
         vm.prank(alice);
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
-        registry.transferId(type(uint256).max, bob);
+        registry.proposeTransfer(type(uint256).max, bob);
     }
 
     function test_TransferId_WrongIdOwnedByOtherReverts() public {
@@ -178,16 +182,20 @@ contract OTTPRegistryTest is Test {
         registry.register();
         vm.prank(alice);
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
-        registry.transferId(2, carol);
+        registry.proposeTransfer(2, carol);
     }
 
     function test_TransferId_ChainOfTransfers() public {
         vm.prank(alice);
         registry.register();
         vm.prank(alice);
-        registry.transferId(1, bob);
+        registry.proposeTransfer(1, bob);
         vm.prank(bob);
-        registry.transferId(1, carol);
+        registry.acceptId(1);
+        vm.prank(bob);
+        registry.proposeTransfer(1, carol);
+        vm.prank(carol);
+        registry.acceptId(1);
         assertEq(registry.getWallet(1), carol);
         assertEq(registry.getId(carol), 1);
         assertEq(registry.getId(bob), 0);
@@ -195,10 +203,10 @@ contract OTTPRegistryTest is Test {
         // the former owners cannot move it anymore
         vm.prank(alice);
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
-        registry.transferId(1, alice);
+        registry.proposeTransfer(1, alice);
         vm.prank(bob);
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
-        registry.transferId(1, bob);
+        registry.proposeTransfer(1, bob);
     }
 
     // ─── registerFor: EIP-712 domain ───────────────────────────────────────────────────────────────────────
@@ -354,7 +362,9 @@ contract OTTPRegistryTest is Test {
         vm.prank(alice);
         registry.register(); // nonce 0 → 1
         vm.prank(alice);
-        registry.transferId(1, bob); // alice is ID-free again
+        registry.proposeTransfer(1, bob); // alice is ID-free again
+        vm.prank(bob);
+        registry.acceptId(1);
         assertEq(registry.getId(alice), 0);
 
         vm.prank(relayer);
@@ -364,7 +374,9 @@ contract OTTPRegistryTest is Test {
         assertEq(registry.totalRegistered(), 1);
         // bob can still hand the ID back to alice (the griefing path from the audit is closed)
         vm.prank(bob);
-        registry.transferId(1, alice);
+        registry.proposeTransfer(1, alice);
+        vm.prank(alice);
+        registry.acceptId(1);
         assertEq(registry.getId(alice), 1);
     }
 
@@ -376,7 +388,9 @@ contract OTTPRegistryTest is Test {
         vm.prank(relayer);
         registry.registerFor(alice, deadline, first); // nonce 0 → 1
         vm.prank(alice);
-        registry.transferId(1, bob);
+        registry.proposeTransfer(1, bob);
+        vm.prank(bob);
+        registry.acceptId(1);
 
         vm.prank(relayer);
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
@@ -398,8 +412,10 @@ contract OTTPRegistryTest is Test {
         registry.register();
         assertEq(registry.nonces(alice), 1, "register(): +1");
         vm.prank(alice);
-        registry.transferId(1, carol);
-        assertEq(registry.nonces(alice), 1, "transferId: unchanged");
+        registry.proposeTransfer(1, carol);
+        vm.prank(carol);
+        registry.acceptId(1);
+        assertEq(registry.nonces(alice), 1, "transfer (propose + accept): unchanged");
         vm.prank(relayer);
         registry.registerFor(alice, deadline, _sig(alicePk, alice, 1, deadline));
         assertEq(registry.nonces(alice), 2, "registerFor(): +1");
@@ -424,18 +440,18 @@ contract OTTPRegistryTest is Test {
         registry.register();
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__NotOwner.selector, 1, bob));
-        registry.transferId(1, carol);
+        registry.proposeTransfer(1, carol);
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__NotOwner.selector, 7, alice));
-        registry.transferId(7, carol);
+        registry.proposeTransfer(7, carol);
         vm.prank(alice);
         vm.expectRevert(OTTPRegistry.OTTPRegistry__ZeroAddress.selector);
-        registry.transferId(1, address(0));
+        registry.proposeTransfer(1, address(0));
         vm.prank(bob);
         registry.register();
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(OTTPRegistry.OTTPRegistry__TargetAlreadyRegistered.selector, bob, 2));
-        registry.transferId(1, bob);
+        registry.proposeTransfer(1, bob);
         uint256 deadline = block.timestamp - 1;
         vm.prank(relayer);
         vm.expectRevert(
@@ -452,7 +468,9 @@ contract OTTPRegistryTest is Test {
         vm.prank(relayer);
         registry.registerFor(alice, deadline, _sig(alicePk, alice, 0, deadline));
         vm.prank(alice);
-        registry.transferId(1, bob);
+        registry.proposeTransfer(1, bob);
+        vm.prank(bob);
+        registry.acceptId(1);
         // alice is ID-free again; the old signature (nonce 0) is dead, nonce 1 works and yields a new ID.
         vm.prank(relayer);
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
@@ -602,7 +620,9 @@ contract OTTPRegistryTest is Test {
         vm.prank(address(wallet));
         assertEq(registry.register(), 1);
         vm.prank(address(wallet));
-        registry.transferId(1, alice);
+        registry.proposeTransfer(1, alice);
+        vm.prank(alice);
+        registry.acceptId(1);
         assertEq(registry.getWallet(1), alice);
     }
 
@@ -693,7 +713,7 @@ contract OTTPRegistryTest is Test {
         vm.assume(caller != alice);
         vm.prank(caller);
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
-        registry.transferId(id, to);
+        registry.proposeTransfer(id, to);
         assertEq(registry.getWallet(1), alice);
     }
 
@@ -702,7 +722,9 @@ contract OTTPRegistryTest is Test {
         vm.prank(alice);
         registry.register();
         vm.prank(alice);
-        registry.transferId(1, to);
+        registry.proposeTransfer(1, to);
+        vm.prank(to);
+        registry.acceptId(1);
         assertEq(registry.getWallet(1), to);
         assertEq(registry.getId(to), 1);
         assertEq(registry.getId(alice), 0);
@@ -715,7 +737,7 @@ contract OTTPRegistryTest is Test {
         vm.assume(id != 1);
         vm.prank(alice);
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
-        registry.transferId(id, to);
+        registry.proposeTransfer(id, to);
     }
 
     function testFuzz_Register_ManyWalletsSequential(uint8 n) public {

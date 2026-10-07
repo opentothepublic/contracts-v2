@@ -357,7 +357,9 @@ abstract contract EASForkBase is Test {
     function test_AfterTransfer_RealEAS() public {
         (address alice2,) = makeAddrAndKey("alice2");
         vm.prank(alice);
-        registry.transferId(1, alice2);
+        registry.proposeTransfer(1, alice2);
+        vm.prank(alice2);
+        registry.acceptId(1);
         vm.prank(alice);
         vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
         eas.attest(AttestationRequest({ schema: subjectSchema, data: _data(_subject(1), EMPTY_UID) }));

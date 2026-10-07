@@ -72,11 +72,11 @@ contract GapRegistryTest is Test {
 
         vm.prank(address(0));
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
-        registry.transferId(2, bob); // unissued
+        registry.proposeTransfer(2, bob); // unissued
 
         vm.prank(address(0));
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
-        registry.transferId(0, bob); // reserved
+        registry.proposeTransfer(0, bob); // reserved
 
         assertEq(registry.getWallet(2), address(0));
         assertEq(registry.getId(bob), 0);
@@ -89,7 +89,7 @@ contract GapRegistryTest is Test {
         registry.register();
         vm.prank(address(0));
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__NotOwner.selector);
-        registry.transferId(id, to);
+        registry.proposeTransfer(id, to);
         assertEq(registry.getWallet(1), alice);
         assertEq(registry.getId(to), to == alice ? 1 : 0);
     }
@@ -102,7 +102,9 @@ contract GapRegistryTest is Test {
         vm.prank(alice);
         registry.register(); // 1
         vm.prank(alice);
-        registry.transferId(1, dave);
+        registry.proposeTransfer(1, dave);
+        vm.prank(dave);
+        registry.acceptId(1);
 
         vm.prank(dave);
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__WalletAlreadyRegistered.selector);
@@ -124,9 +126,13 @@ contract GapRegistryTest is Test {
         vm.prank(alice);
         registry.register();
         vm.prank(alice);
-        registry.transferId(1, bob);
+        registry.proposeTransfer(1, bob);
         vm.prank(bob);
-        registry.transferId(1, alice);
+        registry.acceptId(1);
+        vm.prank(bob);
+        registry.proposeTransfer(1, alice);
+        vm.prank(alice);
+        registry.acceptId(1);
 
         assertEq(registry.getWallet(1), alice);
         assertEq(registry.getId(alice), 1);
@@ -144,9 +150,11 @@ contract GapRegistryTest is Test {
         vm.prank(alice);
         registry.register();
 
-        vm.recordLogs();
         vm.prank(alice);
-        registry.transferId(1, bob);
+        registry.proposeTransfer(1, bob);
+        vm.recordLogs(); // the acceptance is the ownership change
+        vm.prank(bob);
+        registry.acceptId(1);
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
         assertEq(logs.length, 1, "exactly one event");
@@ -187,7 +195,9 @@ contract GapRegistryTest is Test {
         assertEq(registry.nonces(alice), 1, "failed registerFor must not move the nonce");
 
         vm.prank(alice);
-        registry.transferId(1, bob);
+        registry.proposeTransfer(1, bob);
+        vm.prank(bob);
+        registry.acceptId(1);
         vm.prank(relayer);
         vm.expectPartialRevert(OTTPRegistry.OTTPRegistry__InvalidSignature.selector);
         registry.registerFor(alice, deadline, sig);
@@ -283,7 +293,9 @@ contract GapRegistryTest is Test {
         assertEq(firstNewId, 3);
 
         vm.prank(alice);
-        registry.transferId(1, carol);
+        registry.proposeTransfer(1, carol);
+        vm.prank(carol);
+        registry.acceptId(1);
 
         // v3-style claim by the CURRENT owner succeeds, by the former owner fails
         assertTrue(1 < firstNewId && registry.getWallet(1) == carol);
@@ -629,7 +641,9 @@ contract BiasedRegistryHandler is Test {
         uint256 owned = registry.getId(from);
         uint256 id = garbage % 8 == 0 ? garbage : owned; // 1 in 8: a random (almost surely unowned) id
         vm.prank(from);
-        try registry.transferId(id, to) {
+        try registry.proposeTransfer(id, to) {
+            vm.prank(to);
+            registry.acceptId(id); // two-step transfer (addendum B1): the target accepts
             assertEq(id, owned, "moved an id the caller did not own");
             ghostOwner[id] = to;
             okTransfer++;
@@ -689,7 +703,7 @@ contract BiasedRegistryInvariants is Test {
         if (handler.okRegister() + handler.okRegisterFor() + handler.okTransfer() + handler.rejected() > 32) {
             assertGt(handler.okRegister(), 0, "register() never succeeded in this run");
             assertGt(handler.okRegisterFor(), 0, "registerFor() never succeeded in this run");
-            assertGt(handler.okTransfer(), 0, "transferId() never succeeded in this run");
+            assertGt(handler.okTransfer(), 0, "transfer (propose + accept) never succeeded in this run");
         }
         // Negative paths are exercised in the vast majority of runs, but a short run with a lucky draw can have
         // none (observed once in 1000 deep-profile runs). The original RegistryInvariants handler asserts this

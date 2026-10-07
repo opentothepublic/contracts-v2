@@ -379,7 +379,9 @@ contract Audit2ResolversTest is Test {
     /// After transferId: old wallet rejected with exact params, new wallet accepted; history-only semantics.
     function test_Flow_AfterTransfer() public {
         vm.prank(alice);
-        registry.transferId(1, mallory);
+        registry.proposeTransfer(1, mallory);
+        vm.prank(mallory);
+        registry.acceptId(1);
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(OTTPResolver__AttesterNotOwner.selector, 1, alice, mallory));
         eas.attest(subjectSchema, _req(abi.encode(uint256(1), "", "")));
