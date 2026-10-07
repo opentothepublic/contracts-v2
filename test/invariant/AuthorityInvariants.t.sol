@@ -19,6 +19,12 @@ contract AuthorityHandler is Test {
     uint256[N] internal keys;
     address public relayer = makeAddr("relayer");
 
+    struct GDelegate {
+        uint64 expiry;
+        uint256 epoch;
+        bool set;
+    }
+
     struct GAddrEpoch {
         address who;
         uint256 epoch;
@@ -27,10 +33,11 @@ contract AuthorityHandler is Test {
     // ghost model
     mapping(uint256 id => address) public ghostOwner;
     mapping(uint256 id => uint256) public ghostEpoch;
+    mapping(uint256 id => mapping(address => GDelegate)) internal _gDelegate;
     mapping(uint256 id => GAddrEpoch) internal _gTransfer;
     uint256 public ghostIssued;
 
-    // historical grant log: (kind, id, account, epoch) — kind 2 transfer (0 delegate, 1 guardian, 3 recovery: B2/B3)
+    // historical grant log: (kind, id, account, epoch) — kind 0 delegate, 2 transfer
     struct Grant {
         uint8 kind;
         uint256 id;
@@ -251,6 +258,67 @@ contract AuthorityHandler is Test {
         }
     }
 
+    // ─── B2: delegates ─────────────────────────────────────────────────────────────────────────────────────
+
+    function _expiry(uint256 seed) internal view returns (uint64) {
+        uint256 m = seed % 5;
+        if (m == 0) return 0; // revoke
+        if (m == 1) return type(uint64).max;
+        if (m == 2) return uint64(block.timestamp); // invalid
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return uint64(block.timestamp + 1 + seed % 3 days); // test timestamps stay far below 2^64
+    }
+
+    function _recordDelegate(uint256 id, address d, uint64 expiry) internal {
+        if (expiry == 0) {
+            delete _gDelegate[id][d];
+        } else {
+            _gDelegate[id][d] = GDelegate(expiry, ghostEpoch[id], true);
+            _grants.push(Grant(0, id, d, ghostEpoch[id]));
+        }
+    }
+
+    function setDelegate(uint256 callerSeed, uint256 idSeed, uint256 delSeed, uint256 expirySeed)
+        external
+        tracked(address(0))
+    {
+        uint256 c = _i(callerSeed);
+        uint256 id = _owned(c, idSeed);
+        address d = actors[_i(delSeed)];
+        uint64 expiry = _expiry(expirySeed);
+        vm.prank(actors[c]);
+        try registry.setDelegate(id, d, expiry) {
+            _recordDelegate(id, d, expiry);
+            ok["setDelegate"]++;
+        } catch {
+            rejected++;
+        }
+    }
+
+    function setDelegateBySig(uint256 signerSeed, uint256 idSeed, uint256 delSeed, uint256 expirySeed)
+        external
+        tracked(address(0))
+    {
+        uint256 id = _owned(_i(signerSeed), idSeed);
+        address owner = registry.idToWallet(id);
+        uint256 s = _key(owner == address(0) ? _i(signerSeed) : _idx(owner), signerSeed);
+        address d = actors[_i(delSeed)];
+        uint64 expiry = _expiry(expirySeed);
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _signAs(
+            s,
+            AuthoritySigUtils.setDelegateHash(id, d, expiry, registry.ownerEpoch(id), registry.nonces(owner), deadline)
+        );
+        vm.prank(relayer);
+        try registry.setDelegateBySig(id, d, expiry, deadline, sig) {
+            if (owner != actors[s]) badSigAccepted = true;
+            _recordDelegate(id, d, expiry);
+            ok["setDelegateBySig"]++;
+        } catch {
+            rejected++;
+        }
+    }
+
     function warp(uint256 dt) external {
         dt = bound(dt, 1, 8 days);
         vm.warp(block.timestamp + dt);
@@ -260,6 +328,12 @@ contract AuthorityHandler is Test {
 
     function actorCount() external pure returns (uint256) {
         return N;
+    }
+
+    function ghostDelegateActive(uint256 id, address a) external view returns (bool) {
+        GDelegate memory d = _gDelegate[id][a];
+        // forge-lint: disable-next-line(block-timestamp)
+        return d.set && d.epoch == ghostEpoch[id] && block.timestamp < d.expiry && ghostOwner[id] != address(0);
     }
 
     function ghostTransfer(uint256 id) external view returns (address) {
@@ -323,6 +397,10 @@ contract AuthorityInvariants is Test {
         for (uint256 id = 1; id <= total; id++) {
             assertEq(registry.ownerEpoch(id), handler.ghostEpoch(id), "epoch diverged");
             assertEq(registry.pendingTransferOf(id), handler.ghostTransfer(id), "pending transfer diverged");
+            for (uint256 k = 0; k < handler.actorCount(); k++) {
+                address a = handler.actors(k);
+                assertEq(registry.isDelegate(id, a), handler.ghostDelegateActive(id, a), "delegate diverged");
+            }
         }
     }
 
@@ -334,9 +412,26 @@ contract AuthorityInvariants is Test {
             AuthorityHandler.Grant memory g = handler.grantAt(i);
             if (g.epoch == registry.ownerEpoch(g.id)) continue;
             assertLt(g.epoch, registry.ownerEpoch(g.id));
-            if (g.kind == 2 && registry.pendingTransferOf(g.id) == g.account) {
+            if (g.kind == 0 && registry.isDelegate(g.id, g.account)) {
+                assertTrue(handler.ghostDelegateActive(g.id, g.account), "stale delegate active");
+            } else if (g.kind == 2 && registry.pendingTransferOf(g.id) == g.account) {
                 assertEq(handler.ghostTransfer(g.id), g.account, "stale pending transfer live");
             }
+        }
+    }
+
+    /// @dev canAttest(id, x) ⇒ x is the owner, or an unexpired delegate set in the current epoch (and conversely).
+    function invariant_CanAttestIsOwnerOrCurrentDelegate() public view {
+        uint256 total = registry.totalRegistered();
+        for (uint256 id = 0; id <= total + 1; id++) {
+            address owner = registry.idToWallet(id);
+            for (uint256 k = 0; k < handler.actorCount(); k++) {
+                address a = handler.actors(k);
+                bool expected = owner != address(0) && (a == owner || handler.ghostDelegateActive(id, a));
+                assertEq(registry.canAttest(id, a), expected, "canAttest diverged");
+            }
+            assertFalse(registry.canAttest(id, handler.relayer()));
+            assertFalse(registry.canAttest(id, address(0)));
         }
     }
 

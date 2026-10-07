@@ -5,15 +5,16 @@ import { EIP712 } from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import { SignatureChecker } from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 
 import { IOTTPRegistry } from "./IOTTPRegistry.sol";
+import { IOTTPRegistryAuthority } from "./IOTTPRegistryAuthority.sol";
 
 /// @title OTTPRegistry
 /// @notice Issues sequential, permanent OTTP IDs (like Farcaster FIDs). One ID per wallet. An ID moves only with
-///         the receiving wallet's own consent (two-step transfer).
+///         the receiving wallet's own consent (two-step transfer); the owner may grant attest-only delegates.
 /// @dev Immutable by design: no admin, no proxy, no pause, no owner. The deployer has no special powers.
 ///      Implements OTTP v2 Smart Contract Specification v1.2 plus the authority addendum
 ///      (`specs/ottp-contracts-addendum-authority-PROPOSED.md`, PROPOSED — pending ratification).
 ///      Upgrades are generational: a future registry proves records on this one through the public getters.
-contract OTTPRegistry is IOTTPRegistry, EIP712 {
+contract OTTPRegistry is IOTTPRegistryAuthority, EIP712 {
     /// @notice Next ID to issue. Starts at 1; 0 is reserved for "no ID".
     uint256 public nextId = 1;
     /// @notice Current wallet per ID (zero address = nonexistent).
@@ -42,6 +43,8 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
     error OTTPRegistry__SignatureExpired(uint256 deadline, uint256 blockTimestamp);
     /// @notice Signature did not verify for `wallet` (ECDSA or ERC-1271) at its current nonce (and the ID's epoch).
     error OTTPRegistry__InvalidSignature(address wallet);
+    /// @notice An owner-signed action names an ID that has not been issued.
+    error OTTPRegistry__IdNotRegistered(uint256 id);
 
     /// @notice A new ID was claimed (both registration paths).
     event Registered(uint256 indexed id, address indexed wallet);
@@ -71,6 +74,29 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
     event TransferProposed(uint256 indexed id, address indexed owner, address indexed newWallet, uint256 epoch);
     /// @notice The owner withdrew the pending transfer.
     event TransferCancelled(uint256 indexed id, address indexed newWallet);
+
+    // ─── B2: delegates (PROPOSED) ──────────────────────────────────────────────────────────────────────────
+
+    struct Delegation {
+        uint64 expiry;
+        uint96 epoch;
+    }
+
+    /// @dev Attest-only delegates per (ID, account); active only while `epoch == ownerEpoch[id]` and before expiry.
+    mapping(uint256 id => mapping(address account => Delegation)) internal _delegations;
+
+    /// @dev keccak256("SetDelegate(uint256 id,address delegate,uint64 expiry,uint256 epoch,uint256 nonce,uint256 deadline)")
+    bytes32 public constant SET_DELEGATE_TYPEHASH = keccak256(
+        "SetDelegate(uint256 id,address delegate,uint64 expiry,uint256 epoch,uint256 nonce,uint256 deadline)"
+    );
+
+    /// @notice The delegate is the zero address or the ID's owner.
+    error OTTPRegistry__InvalidDelegate(address delegate);
+    /// @notice A non-zero delegate expiry is not in the future.
+    error OTTPRegistry__InvalidExpiry(uint64 expiry);
+
+    /// @notice The owner granted (`expiry > now`) or revoked (`expiry == 0`) attest-only authority for `delegate`.
+    event DelegateSet(uint256 indexed id, address indexed delegate, uint64 expiry, uint256 epoch);
 
     /// @dev EIP-712 domain: name "OTTPRegistry", version "2", chainId = block.chainid, verifyingContract = this.
     ///      Exposed via ERC-5267 `eip712Domain()` (inherited from OpenZeppelin EIP712).
@@ -141,6 +167,34 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
         _accept(id, wallet);
     }
 
+    // ─── B2: delegates (PROPOSED) ──────────────────────────────────────────────────────────────────────────
+
+    /// @notice Grant (`expiry > now`), change, or revoke (`expiry == 0`) attest-only authority for `delegate`.
+    /// @dev Owner only. `type(uint64).max` means no expiry. A delegate can only attest Objects for this ID (via
+    ///      canAttest in the Object resolver); it cannot transfer, accept, set delegates or touch recovery.
+    function setDelegate(uint256 id, address delegate, uint64 expiry) external {
+        _checkOwner(id);
+        _setDelegate(id, msg.sender, delegate, expiry);
+    }
+
+    /// @notice Gasless setDelegate, signed by the ID's current owner over
+    ///         SetDelegate(id, delegate, expiry, ownerEpoch[id], nonces[owner], deadline).
+    /// @dev Consumes exactly one nonce of the owner, after verification. The epoch in the digest is the current
+    ///      one, so signatures from an earlier ownership epoch are dead.
+    function setDelegateBySig(uint256 id, address delegate, uint64 expiry, uint256 deadline, bytes calldata signature)
+        external
+    {
+        _checkDeadline(deadline);
+        address owner = _existingOwner(id);
+        _checkSignature(
+            owner,
+            keccak256(abi.encode(SET_DELEGATE_TYPEHASH, id, delegate, expiry, ownerEpoch[id], nonces[owner], deadline)),
+            signature
+        );
+        _useNonce(owner);
+        _setDelegate(id, owner, delegate, expiry);
+    }
+
     /// @inheritdoc IOTTPRegistry
     function getId(address wallet) external view returns (uint256) {
         return walletToId[wallet];
@@ -154,6 +208,25 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
     /// @inheritdoc IOTTPRegistry
     function totalRegistered() external view returns (uint256) {
         return nextId - 1;
+    }
+
+    /// @inheritdoc IOTTPRegistryAuthority
+    function isDelegate(uint256 id, address account) public view returns (bool) {
+        return delegateExpiry(id, account) != 0;
+    }
+
+    /// @inheritdoc IOTTPRegistryAuthority
+    function canAttest(uint256 id, address account) external view returns (bool) {
+        address owner = idToWallet[id];
+        return owner != address(0) && (account == owner || isDelegate(id, account));
+    }
+
+    /// @notice Active delegate expiry for (`id`, `account`), or 0 if `account` is not an active delegate.
+    function delegateExpiry(uint256 id, address account) public view returns (uint64) {
+        Delegation memory d = _delegations[id][account];
+        // forge-lint: disable-next-line(block-timestamp)
+        if (idToWallet[id] == address(0) || d.epoch != ownerEpoch[id] || block.timestamp >= d.expiry) return 0;
+        return d.expiry;
     }
 
     /// @notice Live pending-transfer target for `id`, or address(0).
@@ -198,6 +271,19 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
         _move(id, wallet);
     }
 
+    function _setDelegate(uint256 id, address owner, address delegate, uint64 expiry) internal {
+        if (delegate == address(0) || delegate == owner) revert OTTPRegistry__InvalidDelegate(delegate);
+        uint96 epoch = ownerEpoch[id];
+        if (expiry == 0) {
+            delete _delegations[id][delegate];
+        } else {
+            // forge-lint: disable-next-line(block-timestamp)
+            if (expiry <= block.timestamp) revert OTTPRegistry__InvalidExpiry(expiry);
+            _delegations[id][delegate] = Delegation({ expiry: expiry, epoch: epoch });
+        }
+        emit DelegateSet(id, delegate, expiry, epoch);
+    }
+
     /// @dev Increments `nonces[signer]`; the single place any nonce moves. Signature paths call it AFTER verifying
     ///      a signature made over the current nonce, so an ERC-1271 wallet sees the pre-increment value during
     ///      `isValidSignature` (unchanged from v1.2).
@@ -222,6 +308,12 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
     function _checkOwner(uint256 id) internal view {
         address owner = idToWallet[id];
         if (owner == address(0) || owner != msg.sender) revert OTTPRegistry__NotOwner(id, msg.sender);
+    }
+
+    /// @dev The ID's current wallet, for owner-signed paths; reverts for an unissued ID.
+    function _existingOwner(uint256 id) internal view returns (address owner) {
+        owner = idToWallet[id];
+        if (owner == address(0)) revert OTTPRegistry__IdNotRegistered(id);
     }
 
     /// @dev A wallet that may receive an ID: non-zero and ID-free (no consolidation, by design).
