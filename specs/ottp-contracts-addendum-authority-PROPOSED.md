@@ -68,8 +68,11 @@ pending recovery for this ID are now void". No per-item events are emitted for t
 - Every signature path consumes **exactly one** nonce of its signer through a single `_useNonce(addr)` helper.
 - `register()` also consumes one (v1.2 D6, unchanged).
 - Other direct (non-signature) calls never touch nonces.
-- The digest is built with the signer's *current* nonce, which `_useNonce` then increments. A failed call
-  reverts, so its nonce is untouched.
+- Order of operations: the digest is built with the signer's *current* nonce, the signature is verified, and
+  only then does `_useNonce` increment the counter.
+  - An ERC-1271 wallet reading `nonces(wallet)` inside `isValidSignature` therefore sees the pre-increment
+    value, as in v1.2.
+  - A failed call reverts, so its nonce is untouched.
 - Clients may therefore pre-sign a chain of messages for one signer at `n`, `n+1`, … For example:
   `registerFor` at `n`, then `setDelegateBySig` at `n+1`.
 

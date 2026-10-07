@@ -19,8 +19,12 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
     mapping(uint256 id => address wallet) public idToWallet;
     /// @notice ID per wallet (0 = none).
     mapping(address wallet => uint256 id) public walletToId;
-    /// @notice EIP-712 nonces for registerFor signatures. Consumed by every registration (either path).
+    /// @notice EIP-712 nonces, one shared counter per signer. Every signature path consumes exactly one nonce of
+    ///         its signer (via _useNonce); register() consumes one too (spec v1.2 D6).
     mapping(address wallet => uint256 nonce) public nonces;
+    /// @notice Ownership epoch per ID. Increments on every ownership change; all granted authority is active only
+    ///         in the epoch it was granted in (authority addendum B0, PROPOSED).
+    mapping(uint256 id => uint96 epoch) public ownerEpoch;
 
     /// @dev keccak256("Register(address wallet,uint256 nonce,uint256 deadline)")
     bytes32 public constant REGISTER_TYPEHASH = keccak256("Register(address wallet,uint256 nonce,uint256 deadline)");
@@ -50,6 +54,7 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
     /// @notice Claim the next available OTTP ID for the caller.
     /// @return id The newly issued ID.
     function register() external returns (uint256 id) {
+        _useNonce(msg.sender);
         return _register(msg.sender);
     }
 
@@ -64,15 +69,9 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
     /// @param signature EIP-712 signature over Register(wallet, nonces[wallet], deadline).
     /// @return id The newly issued ID.
     function registerFor(address wallet, uint256 deadline, bytes calldata signature) external returns (uint256 id) {
-        // forge-lint: disable-next-line(block-timestamp)
-        if (block.timestamp > deadline) revert OTTPRegistry__SignatureExpired(deadline, block.timestamp);
-
-        // Read the nonce BEFORE _register, which is what consumes it.
-        bytes32 digest = _hashTypedDataV4(keccak256(abi.encode(REGISTER_TYPEHASH, wallet, nonces[wallet], deadline)));
-        if (!SignatureChecker.isValidSignatureNow(wallet, digest, signature)) {
-            revert OTTPRegistry__InvalidSignature(wallet);
-        }
-
+        _checkDeadline(deadline);
+        _checkSignature(wallet, keccak256(abi.encode(REGISTER_TYPEHASH, wallet, nonces[wallet], deadline)), signature);
+        _useNonce(wallet);
         return _register(wallet);
     }
 
@@ -82,19 +81,9 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
     /// @param id The ID to move. Must be owned by msg.sender.
     /// @param newWallet The receiving wallet. Must be non-zero and hold no ID.
     function transferId(uint256 id, address newWallet) external {
-        // Unissued IDs map to address(0); the explicit non-zero check keeps this sound even for a hypothetical
-        // zero-address sender (spec v1.2 D1: defense-in-depth beyond a single equality check).
-        address owner = idToWallet[id];
-        if (owner == address(0) || owner != msg.sender) revert OTTPRegistry__NotOwner(id, msg.sender);
-        if (newWallet == address(0)) revert OTTPRegistry__ZeroAddress();
-        uint256 existing = walletToId[newWallet];
-        if (existing != 0) revert OTTPRegistry__TargetAlreadyRegistered(newWallet, existing);
-
-        walletToId[msg.sender] = 0;
-        idToWallet[id] = newWallet;
-        walletToId[newWallet] = id;
-
-        emit Transferred(id, msg.sender, newWallet);
+        _checkOwner(id);
+        _checkReceivable(newWallet);
+        _move(id, newWallet);
     }
 
     /// @inheritdoc IOTTPRegistry
@@ -112,7 +101,7 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
         return nextId - 1;
     }
 
-    /// @dev Shared issuance path for register() and registerFor(). Consumes the wallet's nonce on BOTH paths
+    /// @dev Shared issuance path for register() and registerFor(). Both callers consume the wallet's nonce first
     ///      (spec v1.2 D6), so any registerFor signature issued before a registration is dead after it.
     function _register(address wallet) internal returns (uint256 id) {
         if (wallet == address(0)) revert OTTPRegistry__ZeroAddress();
@@ -123,8 +112,52 @@ contract OTTPRegistry is IOTTPRegistry, EIP712 {
         nextId = id + 1;
         idToWallet[id] = wallet;
         walletToId[wallet] = id;
-        nonces[wallet] += 1;
 
         emit Registered(id, wallet);
+    }
+
+    /// @dev The single ownership-change path: updates both mappings, bumps the epoch (voiding every granted
+    ///      authority), and emits Transferred.
+    function _move(uint256 id, address newWallet) internal returns (address old) {
+        old = idToWallet[id];
+        walletToId[old] = 0;
+        idToWallet[id] = newWallet;
+        walletToId[newWallet] = id;
+        ownerEpoch[id] += 1;
+        emit Transferred(id, old, newWallet);
+    }
+
+    /// @dev Increments `nonces[signer]`; the single place any nonce moves. Signature paths call it AFTER verifying
+    ///      a signature made over the current nonce, so an ERC-1271 wallet sees the pre-increment value during
+    ///      `isValidSignature` (unchanged from v1.2).
+    function _useNonce(address signer) internal returns (uint256 current) {
+        current = nonces[signer];
+        nonces[signer] = current + 1;
+    }
+
+    function _checkDeadline(uint256 deadline) internal view {
+        // forge-lint: disable-next-line(block-timestamp)
+        if (block.timestamp > deadline) revert OTTPRegistry__SignatureExpired(deadline, block.timestamp);
+    }
+
+    /// @dev EIP-712 (domain unchanged) + OZ SignatureChecker: EOA ECDSA or ERC-1271.
+    function _checkSignature(address signer, bytes32 structHash, bytes calldata signature) internal view {
+        if (!SignatureChecker.isValidSignatureNow(signer, _hashTypedDataV4(structHash), signature)) {
+            revert OTTPRegistry__InvalidSignature(signer);
+        }
+    }
+
+    /// @dev msg.sender must be the ID's current, non-zero wallet. Unissued IDs map to address(0); the explicit
+    ///      non-zero check keeps this sound even for a hypothetical zero-address sender (spec v1.2 D1).
+    function _checkOwner(uint256 id) internal view {
+        address owner = idToWallet[id];
+        if (owner == address(0) || owner != msg.sender) revert OTTPRegistry__NotOwner(id, msg.sender);
+    }
+
+    /// @dev A wallet that may receive an ID: non-zero and ID-free (no consolidation, by design).
+    function _checkReceivable(address wallet) internal view {
+        if (wallet == address(0)) revert OTTPRegistry__ZeroAddress();
+        uint256 existing = walletToId[wallet];
+        if (existing != 0) revert OTTPRegistry__TargetAlreadyRegistered(wallet, existing);
     }
 }
