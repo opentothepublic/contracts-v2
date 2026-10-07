@@ -75,6 +75,16 @@ pending recovery for this ID are now void". No per-item events are emitted for t
   - A failed call reverts, so its nonce is untouched.
 - Clients may therefore pre-sign a chain of messages for one signer at `n`, `n+1`, … For example:
   `registerFor` at `n`, then `setDelegateBySig` at `n+1`.
+  - Caveat (liveness only): `SetDelegate` / `SetGuardian` name the `id`. Before registration the client has to
+    predict it from `nextId`.
+  - If another registration lands first, the follow-up signature fails `InvalidSignature`. It can never apply
+    to a different ID.
+  - Robust clients sign the follow-up once the ID is known.
+- Use short deadlines on every `BySig` message. An unrelayed signature stays valid until its deadline, or until
+  the signer's nonce or the ID's epoch moves.
+  - Example: an old owner-signed `SetGuardian` relayed after key loss would cancel a live recovery and restart
+    its clock (review I-3).
+  - Example: an unused `registerFor` survives a direct `acceptId`, which consumes no nonce (review I-2).
 
 | Path | Signer | Nonce consumed |
 |---|---|---|
@@ -226,7 +236,7 @@ Delegate status is checked nowhere except `canAttest`.
 **`setGuardianBySig(uint256 id, address guardian, uint256 deadline, bytes signature)`**
 - Signed by the current owner over `SetGuardian(id, guardian, ownerEpoch[id], nonces[owner], deadline)`.
 - Clients may offer a guardian at registration this way. A client can pre-sign `registerFor` at `n` and
-  `setGuardianBySig` at `n+1`.
+  `setGuardianBySig` at `n+1`, subject to the §2.4 caveat on predicting the `id`.
 
 **`initiateRecovery(uint256 id, address newWallet)`**
 - Callable only by the active guardian (`OTTPRegistry__NotGuardian(id, caller)`).
@@ -268,6 +278,15 @@ Delegate status is checked nowhere except `canAttest`.
   - Clients SHOULD notify owners on `RecoveryInitiated`.
 - A guardian that cancels and re-initiates repeatedly can only delay. It cannot take the ID early, because
   every initiation restarts the clock.
+- **No acceptance window** (review L-1).
+  - A matured recovery stays acceptable by its target until it is cancelled, the guardian is changed, or the
+    ID moves. The same holds for a pending transfer, which never expires.
+  - Ordinary owner activity (attesting, `setDelegate`) does not void either one.
+  - Clients SHOULD surface live pending moves to the owner. Whether to add an expiry is a decision (§9).
+- **Delegates and forwarders** (review L-2).
+  - A delegate is any address, so delegating to a permissionless forwarder lets anyone write Objects under
+    the ID. The EAS `EIP712Proxy` (Base mainnet `0xF095…cbF6`) records itself as the attester.
+  - Clients MUST NOT offer known forwarders as delegates. A client-side blocklist is recommended.
 
 ---
 
@@ -294,9 +313,12 @@ Delegate status is checked nowhere except `canAttest`.
 ## 7. Dropping an item — PROPOSED — pending ratification
 
 - **Drop B3** (guardian recovery): delete the guardian/recovery state, functions, events and errors, and the
-  recovery branch of accept. B0–B2 are unaffected. The B3 commit reverts cleanly.
+  recovery branch of accept. B0–B2 are unaffected. The B3 commit reverts cleanly, back to the tested B2 state.
 - **Drop B2** (delegates): delete the delegate state, functions and views. Restore the Object resolver's
-  owner-equality check and `IOTTPRegistry` type. B0, B1 and B3 are unaffected.
+  owner-equality check. B0, B1 and B3 are unaffected.
+  - Measured: `git revert` of the B2 commit with B3 on top conflicts only where blocks are adjacent
+    (5 hunks in `OTTPRegistry.sol`, 6 in the invariant test).
+  - Every resolution is "delete the B2 block".
 - **Drop B1** (two-step transfer): restore `transferId` (on top of `_move`).
   - If B3 is kept, `acceptId` / `acceptIdBySig` stay as the recovery-only completion path.
   - If B3 is also dropped, they go too.
@@ -352,3 +374,12 @@ The v1.2 errors are reused where they fit: `NotOwner`, `ZeroAddress`, `TargetAlr
    addendum's addition to the brief.
 5. **Object resolver error.** Keep `AttesterNotOwner` (the ABI stays stable, the meaning widens), or add a new
    `AttesterNotAuthorized`?
+6. **Expiry on pending moves** (review L-1). Proposed as built: none. Options:
+   - an acceptance window after `readyAt` (for example `readyAt + 30 days`);
+   - an optional expiry on `proposeTransfer`.
+   Either must be decided before deploy, because the registry is immutable.
+7. **Direct `acceptId` and the nonce** (review I-2). Proposed as built: direct calls other than `register()`
+   consume no nonce. Alternative: `acceptId` consumes `nonces[msg.sender]`, as `register()` does under D6. That
+   kills any outstanding `registerFor` / `AcceptId` signatures of the receiving wallet.
+8. **Delegates may issue V-1-authoritative verifications.** Under D-1 a delegate acts with the ID's full Object
+   authority, verifications included. Confirm, or restrict by indexer rule.

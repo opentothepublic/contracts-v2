@@ -44,6 +44,9 @@ contract AuthorityHandler is Test {
     mapping(uint256 id => GAddrEpoch) internal _gTransfer;
     mapping(uint256 id => GRecovery) internal _gRecovery;
     uint256 public ghostIssued;
+    /// @dev Exactly-one-nonce model (addendum §2.4): +1 for the signer of each successful signature path and for
+    ///      register(); never for any other direct call.
+    mapping(address => uint256) public ghostNonce;
 
     // historical grant log: (kind, id, account, epoch) — kind 0 delegate, 1 guardian, 2 transfer, 3 recovery
     struct Grant {
@@ -169,6 +172,7 @@ contract AuthorityHandler is Test {
         vm.prank(a);
         try registry.register() returns (uint256 id) {
             _onRegister(id, a);
+            ghostNonce[a]++;
             ok["register"]++;
         } catch {
             rejected++;
@@ -189,6 +193,7 @@ contract AuthorityHandler is Test {
         try registry.registerFor(a, deadline, sig) returns (uint256 id) {
             if (actors[s] != a) badSigAccepted = true;
             _onRegister(id, a);
+            ghostNonce[a]++;
             ok["registerFor"]++;
         } catch {
             rejected++;
@@ -278,6 +283,7 @@ contract AuthorityHandler is Test {
         try registry.acceptIdBySig(id, w, deadline, sig) {
             if (actors[s] != w) badSigAccepted = true;
             _onMove(id, w);
+            ghostNonce[w]++;
             ok["acceptIdBySig"]++;
         } catch {
             rejected++;
@@ -339,6 +345,7 @@ contract AuthorityHandler is Test {
         try registry.setDelegateBySig(id, d, expiry, deadline, sig) {
             if (owner != actors[s]) badSigAccepted = true;
             _recordDelegate(id, d, expiry);
+            ghostNonce[owner]++;
             ok["setDelegateBySig"]++;
         } catch {
             rejected++;
@@ -381,6 +388,7 @@ contract AuthorityHandler is Test {
         try registry.setGuardianBySig(id, g, deadline, sig) {
             if (owner != actors[s]) badSigAccepted = true;
             _recordGuardian(id, g);
+            ghostNonce[owner]++;
             ok["setGuardianBySig"]++;
         } catch {
             rejected++;
@@ -394,7 +402,7 @@ contract AuthorityHandler is Test {
         address to = _free(toSeed);
         vm.prank(c);
         try registry.initiateRecovery(id, to) {
-            uint256 readyAt = block.timestamp + registry.RECOVERY_DELAY();
+            uint256 readyAt = block.timestamp + 7 days; // the addendum's constant, not read back
             _gRecovery[id] = GRecovery(to, ghostEpoch[id], readyAt);
             _grants.push(Grant(3, id, to, ghostEpoch[id]));
             ok["initiateRecovery"]++;
@@ -568,6 +576,15 @@ contract AuthorityInvariants is Test {
         assertFalse(handler.monotonicityBroken(), "epoch or nextId decreased");
         assertEq(registry.totalRegistered(), registry.nextId() - 1);
         assertEq(registry.totalRegistered(), handler.ghostIssued());
+    }
+
+    /// @dev Every signature path consumed exactly one nonce of its signer, register() one, nothing else any.
+    function invariant_NoncesMatchExactlyOneModel() public view {
+        for (uint256 k = 0; k < handler.actorCount(); k++) {
+            address a = handler.actors(k);
+            assertEq(registry.nonces(a), handler.ghostNonce(a), "nonce diverged from exactly-one model");
+        }
+        assertEq(registry.nonces(handler.relayer()), 0, "relayer nonce moved");
     }
 
     function invariant_NoEtherHeld() public view {

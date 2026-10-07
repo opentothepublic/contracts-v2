@@ -377,7 +377,7 @@ contract OTTPRegistry is IOTTPRegistryAuthority, EIP712 {
     ///      readyAt has passed (a transfer to `wallet` takes precedence); (2) `wallet` still ID-free; (3) _move, plus
     ///      RecoveryFinalized for a recovery. `wallet == 0` never matches (an empty record reads as target 0).
     function _accept(uint256 id, address wallet) internal {
-        bool isRecovery;
+        bool isRecovery = false;
         if (wallet == address(0) || pendingTransferOf(id) != wallet) {
             (address target, uint256 readyAt) = pendingRecoveryOf(id);
             if (wallet == address(0) || target != wallet) revert OTTPRegistry__NoPendingMove(id, wallet);

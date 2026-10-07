@@ -575,6 +575,9 @@ contract BiasedRegistryHandler is Test {
     uint256 public okRegister;
     uint256 public okRegisterFor;
     uint256 public okTransfer;
+    /// @dev Handler-side assertion failures, recorded rather than reverted: a revert inside a handler is swallowed
+    ///      when fail_on_revert = false. Asserted empty by invariant_NoHandlerViolation.
+    string public violation;
     uint256 public rejected;
 
     constructor(OTTPRegistry _registry) {
@@ -622,12 +625,12 @@ contract BiasedRegistryHandler is Test {
         bytes memory sig = RegistrySigUtils.sign(vm, pk, address(registry), block.chainid, a, nonce, deadline);
         vm.prank(relayer);
         try registry.registerFor(a, deadline, sig) returns (uint256 id) {
-            assertTrue(badness < 8, "registerFor accepted a bad signature/nonce");
+            if (badness >= 8) violation = "registerFor accepted a bad signature/nonce";
             ghostOwner[id] = a;
             ghostNonce[a]++;
             okRegisterFor++;
         } catch {
-            assertTrue(badness >= 8, "a valid sponsored registration was rejected");
+            if (badness < 8) violation = "a valid sponsored registration was rejected";
             rejected++;
         }
     }
@@ -644,11 +647,11 @@ contract BiasedRegistryHandler is Test {
         try registry.proposeTransfer(id, to) {
             vm.prank(to);
             registry.acceptId(id); // two-step transfer (addendum B1): the target accepts
-            assertEq(id, owned, "moved an id the caller did not own");
+            if (id != owned) violation = "moved an id the caller did not own";
             ghostOwner[id] = to;
             okTransfer++;
         } catch {
-            assertTrue(id != owned, "a valid owner-to-free-wallet transfer was rejected");
+            if (id == owned) violation = "a valid owner-to-free-wallet transfer was rejected";
             rejected++;
         }
     }
@@ -681,6 +684,10 @@ contract BiasedRegistryInvariants is Test {
         assertEq(registry.idToWallet(total + 1), address(0));
         assertEq(registry.walletToId(handler.relayer()), 0, "relayer acquired an id");
         assertEq(registry.walletToId(address(0)), 0, "zero address holds an id");
+    }
+
+    function invariant_NoHandlerViolation() public view {
+        assertEq(handler.violation(), "", handler.violation());
     }
 
     function invariant_NoncesMatchGhost() public view {

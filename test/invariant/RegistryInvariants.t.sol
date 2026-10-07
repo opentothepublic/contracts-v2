@@ -25,6 +25,11 @@ contract RegistryHandler is Test {
     uint256 public callsRegisterFor;
     uint256 public callsTransfer;
     uint256 public callsRejected;
+    /// @dev register() calls by an ID-free actor; each one must succeed.
+    uint256 public freshRegisterAttempts;
+    /// @dev Set when a call that must fail succeeds. Asserted by an invariant: a revert inside a handler's `try`
+    ///      success block would be swallowed (fail_on_revert = false), so violations are recorded instead.
+    string public violation;
 
     constructor(OTTPRegistry _registry) {
         registry = _registry;
@@ -40,6 +45,7 @@ contract RegistryHandler is Test {
     function register(uint256 seed) external {
         uint256 i = _actor(seed);
         address a = actors[i];
+        if (registry.walletToId(a) == 0) freshRegisterAttempts++;
         vm.prank(a);
         try registry.register() returns (uint256 id) {
             ghostIssued++;
@@ -63,7 +69,7 @@ contract RegistryHandler is Test {
         vm.prank(relayer);
         try registry.registerFor(a, deadline, sig) returns (uint256 id) {
             // must only ever succeed with a genuine signature and the right nonce
-            assertTrue(validSig && validNonce, "registerFor accepted a bad signature");
+            if (!(validSig && validNonce)) violation = "registerFor accepted a bad signature";
             ghostIssued++;
             ghostOwner[id] = a;
             ghostNonce[a]++;
@@ -82,7 +88,7 @@ contract RegistryHandler is Test {
             RegistrySigUtils.sign(vm, keys[i], address(registry), block.chainid, a, registry.nonces(a), deadline);
         vm.prank(relayer);
         try registry.registerFor(a, deadline, sig) {
-            revert("expired signature accepted");
+            violation = "expired signature accepted";
         } catch {
             callsRejected++;
         }
@@ -102,8 +108,8 @@ contract RegistryHandler is Test {
         try registry.proposeTransfer(id, to) {
             vm.prank(to);
             registry.acceptId(id);
-            assertEq(id, owned, "transferred an ID the caller did not own");
-            assertTrue(id != 0, "transferred id 0");
+            if (id != owned) violation = "transferred an ID the caller did not own";
+            if (id == 0) violation = "transferred id 0";
             ghostOwner[id] = to;
             ghostTransfers++;
             callsTransfer++;
@@ -118,15 +124,13 @@ contract RegistryHandler is Test {
         uint256 id = idSeed % (registry.totalRegistered() + 2);
         vm.prank(stranger);
         try registry.proposeTransfer(id, to) {
-            revert("stranger proposed moving an ID");
-        } catch {
-            callsRejected++;
-        }
+            violation = "stranger proposed moving an ID";
+        } catch { }
         vm.prank(to);
         try registry.acceptId(id) {
-            revert("an ID moved without its owner's proposal");
+            violation = "an ID moved without its owner's proposal";
         } catch {
-            callsRejected++;
+            callsRejected++; // one rejection per handler call
         }
     }
 
@@ -205,6 +209,11 @@ contract RegistryInvariants is Test {
         assertEq(registry.walletToId(handler.relayer()), 0, "relayer acquired an ID");
     }
 
+    /// @dev No call that must fail ever succeeded (recorded by the handler; see `violation`).
+    function invariant_NoHandlerViolation() public view {
+        assertEq(handler.violation(), "", handler.violation());
+    }
+
     function invariant_NoEtherEverHeld() public view {
         assertEq(address(registry).balance, 0);
     }
@@ -214,11 +223,9 @@ contract RegistryInvariants is Test {
     ///      transferId succeed in most but not all short campaigns, so those are checked in aggregate by
     ///      GapTests' BiasedRegistryInvariants rather than here.
     function afterInvariant() public view {
-        // Sanity only: after a normal-depth run register() has succeeded. Not asserted on rejections (a shrunk
-        // or unlucky short run can legitimately have none) and never in a way that masks a real invariant failure.
-        if (handler.callsRegister() + handler.callsRejected() > 8) {
-            assertGt(handler.callsRegister(), 0, "no successful register() in campaign");
-        }
+        // Sanity: every register() by an ID-free actor succeeded. Deterministic (the old "> 8 calls" heuristic
+        // failed spuriously on unlucky short campaigns once transfers became two calls).
+        assertEq(handler.callsRegister(), handler.freshRegisterAttempts(), "a fresh register() did not succeed");
         assertEq(handler.ghostIssued(), handler.callsRegister() + handler.callsRegisterFor(), "ghost issuance mismatch");
     }
 }

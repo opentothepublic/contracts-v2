@@ -1,5 +1,19 @@
 # OTTP v2.1 — contracts
 
+> **Branch `v2.1-authority` — PROPOSED, pending ratification.** This branch implements
+> `specs/ottp-contracts-addendum-authority-PROPOSED.md`. The sections below still describe the ratified v1.2
+> contracts on `v2.1-contracts`. The differences on this branch are:
+> - **B1:** `transferId` is replaced by `proposeTransfer` + `acceptId` / `acceptIdBySig`, so no ID can land in a
+>   wallet without that wallet's consent.
+> - **B2:** attest-only delegates. The Object resolver accepts `registry.canAttest`. The Subject resolver is
+>   unchanged and owner-only.
+> - **B3:** guardian recovery with a 7-day delay.
+> - **B0:** every signature path consumes exactly one nonce.
+>
+> The addendum is the source of truth until this README is rewritten on ratification. Integration notes that
+> mention `transferId` targets now apply to `proposeTransfer` targets and to delegates (never delegate to a
+> forwarder such as the EAS `EIP712Proxy`).
+
 The base-level primitive of the Open Attribution Protocol on Base. Three immutable contracts and two
 non-revocable EAS schemas. Implements `ottp-smart-contracts-spec.md` v1.2 (ratified July 2026, D1–D6 edits September 2026).
 
