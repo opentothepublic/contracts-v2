@@ -335,6 +335,49 @@ abstract contract AuthorityForkBase is Test {
         assertFalse(registry.isDelegate(safeId, delegate));
         _relayEoa(objectSchema, _object(safeId), delegatePk, delegate, OTTPResolver__AttesterNotOwner.selector);
     }
+
+    function test_Guardian_CannotAttest() public {
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 digest = AuthoritySigUtils.toTypedData(
+            address(registry),
+            block.chainid,
+            AuthoritySigUtils.setGuardianHash(
+                safeId, guardian, registry.ownerEpoch(safeId), registry.nonces(address(safe)), deadline
+            )
+        );
+        vm.prank(relayer);
+        registry.setGuardianBySig(safeId, guardian, deadline, _safeSign(safe, digest));
+        assertEq(registry.guardianOf(safeId), guardian);
+
+        _relayEoa(objectSchema, _object(safeId), guardianPk, guardian, OTTPResolver__AttesterNotOwner.selector);
+        _relayEoa(subjectSchema, _subject(safeId), guardianPk, guardian, OTTPResolver__AttesterNotOwner.selector);
+        vm.prank(guardian);
+        vm.expectPartialRevert(OTTPResolver__AttesterNotOwner.selector);
+        eas.attest(AttestationRequest({ schema: objectSchema, data: _data(_object(safeId)) }));
+    }
+
+    function test_Recovery_EndToEnd_GuardianRecoversSafeOwnedIdToEoa() public {
+        _setDelegateViaSafeTx(delegate, FOREVER);
+        _safeExec(safe, address(registry), abi.encodeCall(OTTPRegistry.setGuardian, (safeId, guardian)));
+        (address fresh, uint256 freshPk) = makeAddrAndKey("fresh");
+        vm.prank(guardian);
+        registry.initiateRecovery(safeId, fresh);
+        vm.warp(block.timestamp + registry.RECOVERY_DELAY());
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = AuthoritySigUtils.sign(
+            vm,
+            freshPk,
+            address(registry),
+            block.chainid,
+            AuthoritySigUtils.acceptIdHash(safeId, fresh, registry.ownerEpoch(safeId), 0, deadline)
+        );
+        vm.prank(relayer);
+        registry.acceptIdBySig(safeId, fresh, deadline, sig);
+        assertEq(registry.getWallet(safeId), fresh);
+        // the old delegate is dead; the recovered owner attests normally
+        _relayEoa(objectSchema, _object(safeId), delegatePk, delegate, OTTPResolver__AttesterNotOwner.selector);
+        _relayEoa(subjectSchema, _subject(safeId), freshPk, fresh, bytes4(0));
+    }
 }
 
 /// @notice Base mainnet fork — EAS 1.0.1 (the motivating chain).

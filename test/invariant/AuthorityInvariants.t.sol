@@ -30,14 +30,22 @@ contract AuthorityHandler is Test {
         uint256 epoch;
     }
 
+    struct GRecovery {
+        address who;
+        uint256 epoch;
+        uint256 readyAt;
+    }
+
     // ghost model
     mapping(uint256 id => address) public ghostOwner;
     mapping(uint256 id => uint256) public ghostEpoch;
     mapping(uint256 id => mapping(address => GDelegate)) internal _gDelegate;
+    mapping(uint256 id => GAddrEpoch) internal _gGuardian;
     mapping(uint256 id => GAddrEpoch) internal _gTransfer;
+    mapping(uint256 id => GRecovery) internal _gRecovery;
     uint256 public ghostIssued;
 
-    // historical grant log: (kind, id, account, epoch) — kind 0 delegate, 2 transfer
+    // historical grant log: (kind, id, account, epoch) — kind 0 delegate, 1 guardian, 2 transfer, 3 recovery
     struct Grant {
         uint8 kind;
         uint256 id;
@@ -143,6 +151,7 @@ contract AuthorityHandler is Test {
         ghostOwner[id] = to;
         ghostEpoch[id] += 1;
         delete _gTransfer[id];
+        delete _gRecovery[id];
     }
 
     function _onRegister(uint256 id, address w) internal {
@@ -203,9 +212,10 @@ contract AuthorityHandler is Test {
     }
 
     function cancelTransfer(uint256 callerSeed, uint256 idSeed) external tracked(address(0)) {
-        uint256 c = _i(callerSeed);
-        uint256 id = _owned(c, idSeed);
-        vm.prank(actors[c]);
+        uint256 id = _busyId(idSeed);
+        address owner = registry.idToWallet(id);
+        address c = (owner != address(0) && callerSeed % 4 != 0) ? owner : actors[_i(callerSeed)];
+        vm.prank(c);
         try registry.cancelTransfer(id) {
             delete _gTransfer[id];
             ok["cancelTransfer"]++;
@@ -214,17 +224,33 @@ contract AuthorityHandler is Test {
         }
     }
 
-    /// @dev The live pending-transfer target of `id` 3 times in 4, else a random actor.
+    /// @dev 3 times in 4, an issued id with a live pending transfer or recovery (searching from `seed`); else _id.
+    function _busyId(uint256 seed) internal view returns (uint256) {
+        uint256 next = registry.nextId();
+        if (seed % 4 != 0 && next > 1) {
+            for (uint256 k = 0; k < next - 1; k++) {
+                uint256 id = 1 + (seed + k) % (next - 1);
+                if (registry.pendingTransferOf(id) != address(0)) return id;
+                (address r,) = registry.pendingRecoveryOf(id);
+                if (r != address(0)) return id;
+            }
+        }
+        return _id(seed);
+    }
+
+    /// @dev The live pending target of `id` (recovery or transfer, either first) 3 times in 4, else a random actor.
     function _acceptor(uint256 id, uint256 seed) internal view returns (address) {
         if (seed % 4 != 0) {
             address t = registry.pendingTransferOf(id);
+            (address r,) = registry.pendingRecoveryOf(id);
+            if (r != address(0) && (t == address(0) || seed % 2 == 0)) return r;
             if (t != address(0)) return t;
         }
         return actors[_i(seed)];
     }
 
     function acceptId(uint256 callerSeed, uint256 idSeed) external {
-        uint256 id = _id(idSeed);
+        uint256 id = _busyId(idSeed);
         _acceptId(id, _acceptor(id, callerSeed));
     }
 
@@ -239,7 +265,7 @@ contract AuthorityHandler is Test {
     }
 
     function acceptIdBySig(uint256 walletSeed, uint256 signerSeed, uint256 idSeed) external {
-        uint256 id = _id(idSeed);
+        uint256 id = _busyId(idSeed);
         address w = _acceptor(id, walletSeed);
         _acceptIdBySig(id, w, _key(_idx(w), signerSeed));
     }
@@ -319,9 +345,88 @@ contract AuthorityHandler is Test {
         }
     }
 
+    // ─── B3: guardian recovery ─────────────────────────────────────────────────────────────────────────────
+
+    function _recordGuardian(uint256 id, address g) internal {
+        _gGuardian[id] = GAddrEpoch(g, ghostEpoch[id]);
+        _grants.push(Grant(1, id, g, ghostEpoch[id]));
+        delete _gRecovery[id];
+    }
+
+    function setGuardian(uint256 callerSeed, uint256 idSeed, uint256 gSeed) external tracked(address(0)) {
+        uint256 c = _i(callerSeed);
+        uint256 id = _owned(c, idSeed);
+        if (_spareRecovery(id, gSeed)) return;
+        address g = gSeed % 6 == 0 ? address(0) : actors[_i(gSeed)];
+        vm.prank(actors[c]);
+        try registry.setGuardian(id, g) {
+            _recordGuardian(id, g);
+            ok["setGuardian"]++;
+        } catch {
+            rejected++;
+        }
+    }
+
+    function setGuardianBySig(uint256 signerSeed, uint256 idSeed, uint256 gSeed) external tracked(address(0)) {
+        uint256 id = _owned(_i(signerSeed), idSeed);
+        if (_spareRecovery(id, gSeed)) return;
+        address owner = registry.idToWallet(id);
+        uint256 s = _key(owner == address(0) ? _i(signerSeed) : _idx(owner), signerSeed);
+        address g = gSeed % 6 == 0 ? address(0) : actors[_i(gSeed)];
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _signAs(
+            s, AuthoritySigUtils.setGuardianHash(id, g, registry.ownerEpoch(id), registry.nonces(owner), deadline)
+        );
+        vm.prank(relayer);
+        try registry.setGuardianBySig(id, g, deadline, sig) {
+            if (owner != actors[s]) badSigAccepted = true;
+            _recordGuardian(id, g);
+            ok["setGuardianBySig"]++;
+        } catch {
+            rejected++;
+        }
+    }
+
+    function initiateRecovery(uint256 callerSeed, uint256 idSeed, uint256 toSeed) external tracked(address(0)) {
+        uint256 id = _id(idSeed);
+        address g = registry.guardianOf(id);
+        address c = (g != address(0) && callerSeed % 4 != 0) ? g : actors[_i(callerSeed)];
+        address to = _free(toSeed);
+        vm.prank(c);
+        try registry.initiateRecovery(id, to) {
+            uint256 readyAt = block.timestamp + registry.RECOVERY_DELAY();
+            _gRecovery[id] = GRecovery(to, ghostEpoch[id], readyAt);
+            _grants.push(Grant(3, id, to, ghostEpoch[id]));
+            ok["initiateRecovery"]++;
+        } catch {
+            rejected++;
+        }
+    }
+
+    function cancelRecovery(uint256 callerSeed, uint256 idSeed) external tracked(address(0)) {
+        if (callerSeed % 7 < 3) return; // fire less often than initiateRecovery so some recoveries complete
+        uint256 id = _busyId(idSeed);
+        uint256 m = callerSeed % 3;
+        address c = m == 0 ? registry.idToWallet(id) : m == 1 ? registry.guardianOf(id) : actors[_i(callerSeed)];
+        vm.prank(c);
+        try registry.cancelRecovery(id) {
+            delete _gRecovery[id];
+            ok["cancelRecovery"]++;
+        } catch {
+            rejected++;
+        }
+    }
+
+    /// @dev Half the time, jump just past RECOVERY_DELAY so initiated recoveries mature within a run.
     function warp(uint256 dt) external {
-        dt = bound(dt, 1, 8 days);
+        dt = dt % 2 == 0 ? 7 days + dt % 1 hours : bound(dt, 1, 2 days);
         vm.warp(block.timestamp + dt);
+    }
+
+    /// @dev Any guardian change cancels a live recovery; skip 3 in 4 such calls so recoveries can mature.
+    function _spareRecovery(uint256 id, uint256 seed) internal view returns (bool) {
+        (address r,) = registry.pendingRecoveryOf(id);
+        return r != address(0) && seed % 4 != 0;
     }
 
     // ─── model views (for the invariants) ──────────────────────────────────────────────────────────────────
@@ -336,9 +441,19 @@ contract AuthorityHandler is Test {
         return d.set && d.epoch == ghostEpoch[id] && block.timestamp < d.expiry && ghostOwner[id] != address(0);
     }
 
+    function ghostGuardian(uint256 id) external view returns (address) {
+        GAddrEpoch memory g = _gGuardian[id];
+        return g.epoch == ghostEpoch[id] ? g.who : address(0);
+    }
+
     function ghostTransfer(uint256 id) external view returns (address) {
         GAddrEpoch memory t = _gTransfer[id];
         return t.epoch == ghostEpoch[id] ? t.who : address(0);
+    }
+
+    function ghostRecovery(uint256 id) external view returns (address, uint256) {
+        GRecovery memory r = _gRecovery[id];
+        return r.epoch == ghostEpoch[id] ? (r.who, r.readyAt) : (address(0), 0);
     }
 
     function grantCount() external view returns (uint256) {
@@ -396,7 +511,12 @@ contract AuthorityInvariants is Test {
         uint256 total = registry.totalRegistered();
         for (uint256 id = 1; id <= total; id++) {
             assertEq(registry.ownerEpoch(id), handler.ghostEpoch(id), "epoch diverged");
+            assertEq(registry.guardianOf(id), handler.ghostGuardian(id), "guardian diverged");
             assertEq(registry.pendingTransferOf(id), handler.ghostTransfer(id), "pending transfer diverged");
+            (address r, uint256 readyAt) = registry.pendingRecoveryOf(id);
+            (address gr, uint256 gReady) = handler.ghostRecovery(id);
+            assertEq(r, gr, "pending recovery diverged");
+            assertEq(readyAt, gReady, "recovery readyAt diverged");
             for (uint256 k = 0; k < handler.actorCount(); k++) {
                 address a = handler.actors(k);
                 assertEq(registry.isDelegate(id, a), handler.ghostDelegateActive(id, a), "delegate diverged");
@@ -414,8 +534,16 @@ contract AuthorityInvariants is Test {
             assertLt(g.epoch, registry.ownerEpoch(g.id));
             if (g.kind == 0 && registry.isDelegate(g.id, g.account)) {
                 assertTrue(handler.ghostDelegateActive(g.id, g.account), "stale delegate active");
+            } else if (g.kind == 1 && g.account != address(0) && registry.guardianOf(g.id) == g.account) {
+                assertEq(handler.ghostGuardian(g.id), g.account, "stale guardian active");
             } else if (g.kind == 2 && registry.pendingTransferOf(g.id) == g.account) {
                 assertEq(handler.ghostTransfer(g.id), g.account, "stale pending transfer live");
+            } else if (g.kind == 3) {
+                (address r,) = registry.pendingRecoveryOf(g.id);
+                if (r == g.account) {
+                    (address gr,) = handler.ghostRecovery(g.id);
+                    assertEq(gr, g.account, "stale pending recovery live");
+                }
             }
         }
     }
